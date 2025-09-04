@@ -10,6 +10,8 @@ export default async function handler(req, res) {
     const out = await snaptrade.accountInformation.listUserAccounts({ userId, userSecret });
     return res.status(200).json(out);
   } catch (err) {
-    return res.status(500).json({ error: String(err?.message || err) });
+    const safe =
+      err?.response?.data ?? err?.data ?? err?.message ?? String(err);
+    return res.status(500).json({ error: safe });
   }
 }
