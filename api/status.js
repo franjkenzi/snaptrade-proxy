@@ -1,26 +1,26 @@
 import snaptrade from "./_client.js";
 
 function safeErr(err) {
-  // pokušaj da izvučeš čitljivu poruku
-  const status = err?.response?.status;
+  const status = err?.response?.status || 500;
   const data = err?.response?.data;
   const msg =
     (typeof data === "string" && data) ||
     (data && data.message) ||
     err?.message ||
     "Unknown error";
-
-  return { status: status || 500, message: String(msg) };
+  return { status, message: String(msg) };
 }
 
 export default async function handler(req, res) {
   try {
-    const check = await snaptrade.apiStatus.check();
+    // UZMI SAMO DATA iz Axios odgovora
+    const { data } = await snaptrade.apiStatus.check();
+
     return res.status(200).json({
       ok: true,
       hasClientId: !!process.env.SNAP_CLIENT_ID,
       hasConsumerKey: !!process.env.SNAP_CONSUMER_KEY,
-      status: check,
+      status: data, // <-- serializabilno
     });
   } catch (err) {
     const e = safeErr(err);
