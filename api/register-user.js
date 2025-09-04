@@ -11,8 +11,8 @@ export default async function handler(req, res) {
     const out = await snaptrade.authentication.registerSnapTradeUser({ userId });
     return res.status(200).json(out);
   } catch (err) {
-    const safe =
-      err?.response?.data ?? err?.data ?? err?.message ?? String(err);
-    return res.status(500).json({ error: safe });
+    const status = err?.response?.status || 500;
+    const data = err?.response?.data || { message: err?.message || String(err) };
+    return res.status(status).json({ error: data });
   }
 }
