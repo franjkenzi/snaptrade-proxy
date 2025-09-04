@@ -1,0 +1,9 @@
+{
+  "name": "snaptrade-proxy",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "snaptrade-typescript-sdk": "^4.2.0"
+  }
+}
