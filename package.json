@@ -4,6 +4,9 @@
   "type": "module",
   "private": true,
   "dependencies": {
-    "snaptrade-typescript-sdk": "^4.2.0"
+    "snaptrade-typescript-sdk": "*"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
