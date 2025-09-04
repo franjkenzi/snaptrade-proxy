@@ -15,19 +15,30 @@ export default async function handler(req, res) {
   try {
     const { userId, userSecret } = req.query;
     if (!userId || !userSecret) {
-      return res.status(400).json({ error: "Missing userId or userSecret" });
+      return res.status(400).json({ ok: false, error: "Missing userId or userSecret" });
     }
 
-    // Pozovi SnapTrade SDK za listu naloga (naziv metode zavisi od SDK-a koji koristiš)
-    const resp = await snaptrade.accounts.list({ userId, userSecret });
+    // ⚠️ PRAVILAN API: AccountInformation → listUserAccounts
+    const api =
+      snaptrade.accountInformation ||
+      snaptrade.AccountInformation ||
+      snaptrade.accounts ||
+      null;
 
-    // ako SDK vraća { data }, uzmi data; ako vraća već gotov objekat, samo ga vrati
-    const payload = resp?.data ?? resp;
-    return res.status(200).json({ ok: true, accounts: payload });
+    if (!api || typeof api.listUserAccounts !== "function") {
+      throw new Error("SDK mismatch: accountInformation.listUserAccounts not found");
+    }
+
+    const resp = await api.listUserAccounts({ userId, userSecret });
+
+    // Neki SDK buildovi vraćaju { data }, neki direktno niz:
+    const accounts = Array.isArray(resp) ? resp : (resp?.data ?? resp ?? []);
+    return res.status(200).json({ ok: true, accounts });
   } catch (err) {
     const { status, data } = pickError(err);
     return res.status(status).json({ ok: false, error: data });
   }
 }
+
 
 
