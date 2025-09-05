@@ -1,4 +1,4 @@
-// /api/positions.js
+// api/positions.js
 import snaptrade from "./_client.js";
 
 export default async function handler(req, res) {
@@ -14,33 +14,32 @@ export default async function handler(req, res) {
         .json({ ok: false, error: "Missing userId or userSecret" });
     }
 
-    // SDK traži 'accounts' (lista); accountId je opcionalan
-    const params = { userId, userSecret };
-    if (accountId) params.accounts = [accountId];
-
-    // Neke verzije SDK-a imaju holdingsGet, neke getHoldings
+    // SDK razlike: negde je getHoldings, negde holdingsGet
     const api = snaptrade.holdings;
-    const fn =
-      api?.holdingsGet?.bind(api) ||
-      api?.getHoldings?.bind(api);
+    const fn = api?.getHoldings || api?.holdingsGet;
+
     if (!fn) {
       return res
         .status(500)
         .json({ ok: false, error: "Holdings API not initialized" });
     }
 
-    const resp = await fn(params);
-    const payload = resp?.data ?? resp; // pokriva obe varijante SDK-a
+    // Neke verzije traže brokerageAccountId umesto accountId
+    const params =
+      accountId
+        ? { userId, userSecret, accountId, brokerageAccountId: accountId }
+        : { userId, userSecret };
 
-    return res.status(200).json({ ok: true, positions: payload });
+    const out = await fn.call(api, params);
+
+    return res.status(200).json({ ok: true, positions: out });
   } catch (err) {
     const status = err?.response?.status ?? 500;
     const data =
-      err?.response?.data ??
-      err?.message ??
-      String(err);
+      err?.response?.data ?? { message: String(err?.message || err) };
     return res.status(status).json({ ok: false, error: data });
   }
 }
+
 
 
