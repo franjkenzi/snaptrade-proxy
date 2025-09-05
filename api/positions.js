@@ -1,3 +1,4 @@
+// api/positions.js
 import snaptrade from "./_client.js";
 
 export default async function handler(req, res) {
@@ -5,37 +6,53 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
-  const { userId, userSecret, accountId } = req.query;
-  if (!userId || !userSecret) {
-    return res.status(400).json({ ok: false, error: "Missing userId or userSecret" });
-  }
-
   try {
-    const api = snaptrade.holdings;
+    const { userId, userSecret, accountId } = req.query;
+    if (!userId || !userSecret) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing userId or userSecret" });
+    }
 
-    // razne verzije SDK-a koriste druga imena
-    const fn =
-      api?.holdingsGet ||
-      api?.getHoldings ||
-      api?.listUserHoldings ||
-      api?.getAllUserHoldings ||
-      api?.portfolioHoldings?.holdingsGet;
+    // U ovom buildu holdings endpointi su u AccountInformationApi
+    const api = snaptrade.accountInformation;
 
-    if (!fn) {
-      return res.status(500).json({ ok: false, error: "Holdings endpoint not available in this SDK build" });
+    // Moguća imena metoda kroz različite verzije SDK-a
+    const candidates = [
+      "holdingsGet",
+      "getHoldings",
+      "portfolioHoldings",
+      "portfolioHoldingsHoldingsGet",
+      "getAllHoldings",
+      "listHoldings",
+      "listUserHoldings",
+    ];
+
+    const fnName = candidates.find(
+      (name) => typeof api?.[name] === "function"
+    );
+
+    if (!fnName) {
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Holdings method not found on AccountInformationApi for this SDK build",
+      });
     }
 
     const params = { userId, userSecret };
     if (accountId) params.accountId = accountId;
 
-    const data = await fn.call(api, params);
+    const data = await api[fnName](params);
+
     return res.status(200).json({ ok: true, positions: data });
   } catch (err) {
     const status = err?.response?.status || 500;
-    const detail = err?.response?.data || { message: String(err) };
-    return res.status(status).json({ ok: false, error: detail });
+    const data = err?.response?.data || { message: String(err) };
+    return res.status(status).json({ ok: false, error: data });
   }
 }
+
 
 
 
