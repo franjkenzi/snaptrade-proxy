@@ -6,37 +6,39 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
+  const { userId, userSecret, accountId } = req.query;
+  if (!userId || !userSecret) {
+    return res.status(400).json({ ok: false, error: "Missing userId or userSecret" });
+  }
+
   try {
-    const { userId, userSecret, accountId } = req.query;
-    if (!userId || !userSecret) {
-      return res.status(400).json({ ok: false, error: "Missing userId or userSecret" });
-    }
+    const api = snaptrade.holdings;
 
-    const params = { userId, userSecret, accountId };
-
-    // različite varijante po verziji SDK-a
-    const api =
-      snaptrade.portfolioHoldings ??
-      snaptrade.holdings ??
-      snaptrade.accountInformation;
-
+    // razne verzije SDK-a: probaj ova imena redom
     const fn =
       api?.holdingsGet ??
       api?.getHoldings ??
-      api?.listUserHoldings; // ako postoji u tvojoj verziji
+      api?.portfolioHoldings?.holdingsGet;
 
     if (!fn) {
-      throw new Error("Holdings method not found on current SDK version");
+      return res
+        .status(500)
+        .json({ ok: false, error: "Holdings endpoint not available in SDK" });
     }
 
+    const params = { userId, userSecret };
+    if (accountId) params.accountId = accountId;
+
     const data = await fn.call(api, params);
+
     return res.status(200).json({ ok: true, positions: data });
   } catch (err) {
     const status = err?.response?.status || 500;
-    const data = err?.response?.data ?? { message: String(err) };
-    return res.status(status).json({ ok: false, error: data });
+    const detail = err?.response?.data || { message: String(err) };
+    return res.status(status).json({ ok: false, error: detail });
   }
 }
+
 
 
 
