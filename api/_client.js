@@ -1,30 +1,44 @@
 // api/_client.js
 
-import pkg from "snaptrade-typescript-sdk";
+// Uvezi ceo modul kao namespace – radi i kad je paket CommonJS.
+import * as SDK from "snaptrade-typescript-sdk";
 
-// CJS paket => sve ide kroz default import pa destrukturiranje
-const {
-  Configuration,        // << umesto createConfiguration
-  APIStatusApi,
-  AuthenticationApi,
-  AccountsApi,
-  HoldingsApi,
-} = pkg;
+// Napravi config – SDK u nekim buildovima ima class Configuration,
+// a u nekim createConfiguration(). Podržimo oba.
+let config;
+if (typeof SDK.Configuration === "function") {
+  config = new SDK.Configuration({
+    consumerKey: process.env.SNAP_CONSUMER_KEY,
+    clientId: process.env.SNAP_CLIENT_ID,
+  });
+} else if (typeof SDK.createConfiguration === "function") {
+  config = SDK.createConfiguration({
+    consumerKey: process.env.SNAP_CONSUMER_KEY,
+    clientId: process.env.SNAP_CLIENT_ID,
+  });
+} else {
+  throw new Error("SnapTrade SDK: Configuration helper not found");
+}
 
-// Napravi konfiguraciju sa env varovima iz Vercel-a
-const config = new Configuration({
-  consumerKey: process.env.SNAP_CONSUMER_KEY,
-  clientId: process.env.SNAP_CLIENT_ID,
-});
+// Neke verzije imaju malo drugačija imena – obezbedimo fallback.
+const APIStatusApiCtor       = SDK.APIStatusApi       || SDK.ApiStatusApi;
+const AuthenticationApiCtor  = SDK.AuthenticationApi;
+const AccountsApiCtor        = SDK.AccountsApi        || SDK.AccountInformationApi;
+const HoldingsApiCtor        = SDK.HoldingsApi        || SDK.PortfolioHoldingsApi;
 
-// Izvezi instancirane API-je
+if (!APIStatusApiCtor || !AuthenticationApiCtor || !AccountsApiCtor || !HoldingsApiCtor) {
+  throw new Error("SnapTrade SDK: One or more API classes not found in this build");
+}
+
+// Izvezi objekat sa instanciranim API-jevima
 const snaptrade = {
-  apiStatus: new APIStatusApi(config),
-  authentication: new AuthenticationApi(config),
-  accountInformation: new AccountsApi(config),
-  holdings: new HoldingsApi(config),
+  apiStatus:        new APIStatusApiCtor(config),
+  authentication:   new AuthenticationApiCtor(config),
+  accountInformation: new AccountsApiCtor(config),
+  holdings:         new HoldingsApiCtor(config),
 };
 
 export default snaptrade;
+
 
 
