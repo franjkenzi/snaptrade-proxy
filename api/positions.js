@@ -14,16 +14,16 @@ export default async function handler(req, res) {
   try {
     const api = snaptrade.holdings;
 
-    // razne verzije SDK-a: probaj ova imena redom
+    // SDK verzije imaju različita imena – probamo redom
     const fn =
-      api?.holdingsGet ??
-      api?.getHoldings ??
-      api?.portfolioHoldings?.holdingsGet;
+      api?.holdingsGet ||
+      api?.getHoldings ||
+      api?.portfolioHoldings?.holdingsGet ||
+      api?.listUserHoldings ||
+      api?.getAllUserHoldings;
 
     if (!fn) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "Holdings endpoint not available in SDK" });
+      return res.status(500).json({ ok: false, error: "Holdings endpoint not available in this SDK build" });
     }
 
     const params = { userId, userSecret };
@@ -38,6 +38,7 @@ export default async function handler(req, res) {
     return res.status(status).json({ ok: false, error: detail });
   }
 }
+
 
 
 
