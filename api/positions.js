@@ -1,4 +1,3 @@
-// api/positions.js
 import snaptrade from "./_client.js";
 
 export default async function handler(req, res) {
@@ -14,13 +13,13 @@ export default async function handler(req, res) {
   try {
     const api = snaptrade.holdings;
 
-    // SDK verzije imaju različita imena – probamo redom
+    // razne verzije SDK-a koriste druga imena
     const fn =
       api?.holdingsGet ||
       api?.getHoldings ||
-      api?.portfolioHoldings?.holdingsGet ||
       api?.listUserHoldings ||
-      api?.getAllUserHoldings;
+      api?.getAllUserHoldings ||
+      api?.portfolioHoldings?.holdingsGet;
 
     if (!fn) {
       return res.status(500).json({ ok: false, error: "Holdings endpoint not available in this SDK build" });
@@ -30,7 +29,6 @@ export default async function handler(req, res) {
     if (accountId) params.accountId = accountId;
 
     const data = await fn.call(api, params);
-
     return res.status(200).json({ ok: true, positions: data });
   } catch (err) {
     const status = err?.response?.status || 500;
@@ -38,6 +36,7 @@ export default async function handler(req, res) {
     return res.status(status).json({ ok: false, error: detail });
   }
 }
+
 
 
 
