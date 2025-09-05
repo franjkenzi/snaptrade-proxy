@@ -2,21 +2,22 @@
 
 import pkg from "snaptrade-typescript-sdk";
 
-// CommonJS -> iz default importa vadimo potrebne klase/funkcije
+// CJS paket => sve ide kroz default import pa destrukturiranje
 const {
-  createConfiguration,
+  Configuration,        // << umesto createConfiguration
   APIStatusApi,
   AuthenticationApi,
   AccountsApi,
   HoldingsApi,
 } = pkg;
 
-const config = createConfiguration({
+// Napravi konfiguraciju sa env varovima iz Vercel-a
+const config = new Configuration({
   consumerKey: process.env.SNAP_CONSUMER_KEY,
   clientId: process.env.SNAP_CLIENT_ID,
 });
 
-// Jedinstveni “client” koji izvozimo
+// Izvezi instancirane API-je
 const snaptrade = {
   apiStatus: new APIStatusApi(config),
   authentication: new AuthenticationApi(config),
