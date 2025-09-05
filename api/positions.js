@@ -7,18 +7,16 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { userId, userSecret, accountId } = req.query;
+    const { userId, userSecret, accountId, debug } = req.query;
     if (!userId || !userSecret) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Missing userId or userSecret" });
+      return res.status(400).json({ ok: false, error: "Missing userId or userSecret" });
     }
 
-    // U ovom buildu holdings endpointi su u AccountInformationApi
+    // U ovom buildu holdings su pod AccountInformationApi
     const api = snaptrade.accountInformation;
 
-    // Moguća imena metoda kroz različite verzije SDK-a
-    const candidates = [
+    // Kandidati iz raznih verzija SDK-a + fallback pretraga po imenu
+    const preferred = [
       "holdingsGet",
       "getHoldings",
       "portfolioHoldings",
@@ -28,15 +26,29 @@ export default async function handler(req, res) {
       "listUserHoldings",
     ];
 
-    const fnName = candidates.find(
-      (name) => typeof api?.[name] === "function"
-    );
+    let fnName = preferred.find((name) => typeof api?.[name] === "function");
+
+    // Fallback: pronađi PRVU metodu koja u nazivu sadrži "hold"
+    if (!fnName) {
+      const dynamic = Object.keys(api || {}).filter(
+        (k) => typeof api[k] === "function" && /hold/i.test(k)
+      );
+      fnName = dynamic[0];
+      if (debug === "1") {
+        return res.status(500).json({
+          ok: false,
+          error: "Holdings method not found on AccountInformationApi for this SDK build",
+          tried: preferred,
+          dynamicFound: dynamic,
+          allFunctionKeys: Object.keys(api || {}).filter((k) => typeof api[k] === "function"),
+        });
+      }
+    }
 
     if (!fnName) {
       return res.status(500).json({
         ok: false,
-        error:
-          "Holdings method not found on AccountInformationApi for this SDK build",
+        error: "Holdings method not found on AccountInformationApi for this SDK build",
       });
     }
 
@@ -44,14 +56,14 @@ export default async function handler(req, res) {
     if (accountId) params.accountId = accountId;
 
     const data = await api[fnName](params);
-
-    return res.status(200).json({ ok: true, positions: data });
+    return res.status(200).json({ ok: true, usedMethod: fnName, positions: data });
   } catch (err) {
     const status = err?.response?.status || 500;
     const data = err?.response?.data || { message: String(err) };
     return res.status(status).json({ ok: false, error: data });
   }
 }
+
 
 
 
