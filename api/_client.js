@@ -1,18 +1,20 @@
 // api/_client.js
 
-// Uvezi ceo modul kao namespace – radi i kad je paket CommonJS.
+// Uvezemo ceo modul; u CJS buildu sve klase su pod `default`.
 import * as SDK from "snaptrade-typescript-sdk";
 
-// Napravi config – SDK u nekim buildovima ima class Configuration,
-// a u nekim createConfiguration(). Podržimo oba.
+// radi i za ESM i za CJS varijantu
+const root = SDK?.default ?? SDK;
+
+// Napravi configuration (u nekim buildovima je class, u nekim funkcija)
 let config;
-if (typeof SDK.Configuration === "function") {
-  config = new SDK.Configuration({
+if (typeof root?.Configuration === "function") {
+  config = new root.Configuration({
     consumerKey: process.env.SNAP_CONSUMER_KEY,
     clientId: process.env.SNAP_CLIENT_ID,
   });
-} else if (typeof SDK.createConfiguration === "function") {
-  config = SDK.createConfiguration({
+} else if (typeof root?.createConfiguration === "function") {
+  config = root.createConfiguration({
     consumerKey: process.env.SNAP_CONSUMER_KEY,
     clientId: process.env.SNAP_CLIENT_ID,
   });
@@ -20,25 +22,25 @@ if (typeof SDK.Configuration === "function") {
   throw new Error("SnapTrade SDK: Configuration helper not found");
 }
 
-// Neke verzije imaju malo drugačija imena – obezbedimo fallback.
-const APIStatusApiCtor       = SDK.APIStatusApi       || SDK.ApiStatusApi;
-const AuthenticationApiCtor  = SDK.AuthenticationApi;
-const AccountsApiCtor        = SDK.AccountsApi        || SDK.AccountInformationApi;
-const HoldingsApiCtor        = SDK.HoldingsApi        || SDK.PortfolioHoldingsApi;
+// U različitim buildovima nazivi mogu da variraju – dodaj fallback-e
+const APIStatusApiCtor      = root.APIStatusApi      || root.ApiStatusApi;
+const AuthenticationApiCtor = root.AuthenticationApi;
+const AccountsApiCtor       = root.AccountsApi       || root.AccountInformationApi;
+const HoldingsApiCtor       = root.HoldingsApi       || root.PortfolioHoldingsApi;
 
 if (!APIStatusApiCtor || !AuthenticationApiCtor || !AccountsApiCtor || !HoldingsApiCtor) {
   throw new Error("SnapTrade SDK: One or more API classes not found in this build");
 }
 
-// Izvezi objekat sa instanciranim API-jevima
 const snaptrade = {
-  apiStatus:        new APIStatusApiCtor(config),
-  authentication:   new AuthenticationApiCtor(config),
+  apiStatus:          new APIStatusApiCtor(config),
+  authentication:     new AuthenticationApiCtor(config),
   accountInformation: new AccountsApiCtor(config),
-  holdings:         new HoldingsApiCtor(config),
+  holdings:           new HoldingsApiCtor(config),
 };
 
 export default snaptrade;
+
 
 
 
