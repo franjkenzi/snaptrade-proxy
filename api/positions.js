@@ -12,102 +12,61 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "Missing userId or userSecret" });
     }
 
-    // U ovom buildu holdings su ispod AccountInformation API-ja
     const api = snaptrade.accountInformation;
 
-    // Helper: sakupi SVA imena funkcija sa instance + SVIH prototipova
-    const collectFunctionKeys = (obj) => {
-      const out = new Set();
-
-      // own (uključuje i ne-enumerabilna svojstva)
-      for (const k of Object.getOwnPropertyNames(obj)) {
-        try {
-          if (typeof obj[k] === "function") out.add(k);
-        } catch (_) {}
-      }
-
-      // chain
-      let cur = Object.getPrototypeOf(obj);
-      while (cur && cur !== Object.prototype) {
-        for (const k of Object.getOwnPropertyNames(cur)) {
-          try {
-            if (typeof obj[k] === "function") out.add(k);
-          } catch (_) {}
-        }
-        cur = Object.getPrototypeOf(cur);
-      }
-      return [...out];
+    // Helper: bezbedno izdvoj samo payload iz Axios odgovora
+    const callAndUnwrap = async (fnName, payload) => {
+      const resp = await api[fnName](payload);
+      const raw = resp && typeof resp === "object" && "data" in resp ? resp.data : resp;
+      // očisti sve ne-serializabilne stvari
+      return JSON.parse(JSON.stringify(raw));
     };
 
-    const allFnKeys = collectFunctionKeys(api);
+    let usedMethod = null;
+    let data = null;
 
-    // Kandidati po nazivima u raznim verzijama SDK-a
-    const preferred = [
-      "holdingsGet",
-      "getHoldings",
-      "portfolioHoldings",
-      "portfolioHoldingsHoldingsGet",
-      "getAllHoldings",
-      "listHoldings",
-      "listUserHoldings",
-    ];
-
-    // Prvo probaj preferirane
-    let fnName = preferred.find((n) => allFnKeys.includes(n));
-    // Ako nema – bilo koja metoda koja sadrži 'hold'
-    if (!fnName) fnName = allFnKeys.find((k) => /hold/i.test(k));
-
-    if (debug === "1" && !fnName) {
-      return res.status(500).json({
-        ok: false,
-        error: "Holdings method not found on AccountInformationApi for this SDK build",
-        tried: preferred,
-        allFunctionKeys: allFnKeys,
-      });
-    }
-
-    if (!fnName) {
-      return res.status(500).json({
-        ok: false,
-        error:
-          "Holdings method not found on AccountInformationApi for this SDK build (pogledaj ?debug=1 da vidiš dostupne ključeve)",
-      });
-    }
-
-    // Različite verzije očekuju različite oblike parametara
-    const payloads = [];
     if (accountId) {
-      payloads.push({ userId, userSecret, accountId });
-      payloads.push({ userId, userSecret, accounts: [accountId] });
-      payloads.push({ userId, userSecret, account: accountId });
-    }
-    payloads.push({ userId, userSecret }); // fallback: sve naloge
+      // imamo konkretan nalog → probaj getUserHoldings sa nekoliko "shape"-ova
+      usedMethod = "getUserHoldings";
+      const payloads = [
+        { userId, userSecret, accountId },
+        { userId, userSecret, accounts: [accountId] },
+        { userId, userSecret, account: accountId },
+      ];
 
-    let lastErr = null;
-    for (const payload of payloads) {
-      try {
-        const data = await api[fnName].call(api, payload);
-        return res
-          .status(200)
-          .json({ ok: true, usedMethod: fnName, payloadUsed: payload, positions: data });
-      } catch (e) {
-        lastErr = e?.response?.data ?? { message: String(e) };
+      let lastErr = null;
+      for (const p of payloads) {
+        try {
+          data = await callAndUnwrap(usedMethod, p);
+          return res.status(200).json({ ok: true, usedMethod, payloadUsed: p, positions: data });
+        } catch (e) {
+          lastErr = e?.response?.data ?? { message: String(e?.message || e) };
+        }
       }
+      return res.status(500).json({
+        ok: false,
+        error: lastErr || "All attempts failed",
+        usedMethod,
+        triedPayloads: payloads,
+      });
     }
 
-    return res.status(500).json({
-      ok: false,
-      error: lastErr || "All attempts failed",
-      usedMethod: fnName,
-      triedPayloads: payloads,
-      availableFns: allFnKeys,
-    });
+    // bez accountId → sve pozicije korisnika
+    usedMethod = "getAllUserHoldings";
+    try {
+      data = await callAndUnwrap(usedMethod, { userId, userSecret });
+      return res.status(200).json({ ok: true, usedMethod, positions: data });
+    } catch (e) {
+      const errData = e?.response?.data ?? { message: String(e?.message || e) };
+      return res.status(500).json({ ok: false, error: errData, usedMethod });
+    }
   } catch (err) {
     const status = err?.response?.status || 500;
-    const data = err?.response?.data || { message: String(err) };
+    const data = err?.response?.data || { message: String(err?.message || err) };
     return res.status(status).json({ ok: false, error: data });
   }
 }
+
 
 
 
