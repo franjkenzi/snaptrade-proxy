@@ -12,10 +12,36 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: "Missing userId or userSecret" });
     }
 
-    // U ovom buildu holdings su pod AccountInformationApi
+    // U ovom buildu holdings su ispod AccountInformation API-ja
     const api = snaptrade.accountInformation;
 
-    // Nazivi koji se javljaju u različitim verzijama SDK-a
+    // Helper: sakupi SVA imena funkcija sa instance + SVIH prototipova
+    const collectFunctionKeys = (obj) => {
+      const out = new Set();
+
+      // own (uključuje i ne-enumerabilna svojstva)
+      for (const k of Object.getOwnPropertyNames(obj)) {
+        try {
+          if (typeof obj[k] === "function") out.add(k);
+        } catch (_) {}
+      }
+
+      // chain
+      let cur = Object.getPrototypeOf(obj);
+      while (cur && cur !== Object.prototype) {
+        for (const k of Object.getOwnPropertyNames(cur)) {
+          try {
+            if (typeof obj[k] === "function") out.add(k);
+          } catch (_) {}
+        }
+        cur = Object.getPrototypeOf(cur);
+      }
+      return [...out];
+    };
+
+    const allFnKeys = collectFunctionKeys(api);
+
+    // Kandidati po nazivima u raznim verzijama SDK-a
     const preferred = [
       "holdingsGet",
       "getHoldings",
@@ -26,31 +52,17 @@ export default async function handler(req, res) {
       "listUserHoldings",
     ];
 
-    // 1) Pokušaj direktno na instanci
-    let fnName = preferred.find((n) => typeof api?.[n] === "function");
-
-    // 2) Ako nema, pretraži PROTOTIP (tu su metode u ovom buildu)
-    const proto = Object.getPrototypeOf(api) || {};
-    const protoFnKeys = Object.getOwnPropertyNames(proto).filter(
-      (k) => typeof api[k] === "function"
-    );
-
-    if (!fnName) {
-      fnName = preferred.find((n) => protoFnKeys.includes(n));
-    }
-    // 3) Ako i dalje nema, uzmi prvu metodu koja u nazivu sadrži "hold"
-    if (!fnName) {
-      fnName = protoFnKeys.find((k) => /hold/i.test(k));
-    }
+    // Prvo probaj preferirane
+    let fnName = preferred.find((n) => allFnKeys.includes(n));
+    // Ako nema – bilo koja metoda koja sadrži 'hold'
+    if (!fnName) fnName = allFnKeys.find((k) => /hold/i.test(k));
 
     if (debug === "1" && !fnName) {
       return res.status(500).json({
         ok: false,
         error: "Holdings method not found on AccountInformationApi for this SDK build",
         tried: preferred,
-        dynamicFound: [],
-        allFunctionKeys: Object.keys(api || {}).filter((k) => typeof api[k] === "function"),
-        protoFunctionKeys: protoFnKeys,
+        allFunctionKeys: allFnKeys,
       });
     }
 
@@ -58,17 +70,38 @@ export default async function handler(req, res) {
       return res.status(500).json({
         ok: false,
         error:
-          "Holdings method not found on AccountInformationApi for this SDK build (proveri protoFunctionKeys sa ?debug=1)",
+          "Holdings method not found on AccountInformationApi for this SDK build (pogledaj ?debug=1 da vidiš dostupne ključeve)",
       });
     }
 
-    const params = { userId, userSecret };
-    if (accountId) params.accountId = accountId;
+    // Različite verzije očekuju različite oblike parametara
+    const payloads = [];
+    if (accountId) {
+      payloads.push({ userId, userSecret, accountId });
+      payloads.push({ userId, userSecret, accounts: [accountId] });
+      payloads.push({ userId, userSecret, account: accountId });
+    }
+    payloads.push({ userId, userSecret }); // fallback: sve naloge
 
-    // Važno: pozovi metodu sa ispravnim this-om
-    const data = await api[fnName].call(api, params);
+    let lastErr = null;
+    for (const payload of payloads) {
+      try {
+        const data = await api[fnName].call(api, payload);
+        return res
+          .status(200)
+          .json({ ok: true, usedMethod: fnName, payloadUsed: payload, positions: data });
+      } catch (e) {
+        lastErr = e?.response?.data ?? { message: String(e) };
+      }
+    }
 
-    return res.status(200).json({ ok: true, usedMethod: fnName, positions: data });
+    return res.status(500).json({
+      ok: false,
+      error: lastErr || "All attempts failed",
+      usedMethod: fnName,
+      triedPayloads: payloads,
+      availableFns: allFnKeys,
+    });
   } catch (err) {
     const status = err?.response?.status || 500;
     const data = err?.response?.data || { message: String(err) };
