@@ -3,58 +3,62 @@ import crypto from "crypto";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
-  const clientId = process.env.SNAP_CLIENT_ID || "";
-  const consumerKey = process.env.SNAP_CONSUMER_KEY || "";
+  const clientId = process.env.SNAP_CLIENT_ID;       // npr. KOVAC-DIG-TEST-EXJOH
+  const consumerKey = process.env.SNAP_CONSUMER_KEY; // tajni key iz SnapTrade-a
 
-  // ---- BASIC AUTH (decode & compare) ----
-  const auth = req.headers.authorization || "";
+  // ---------- BASIC AUTH PROVERA ----------
   let basicOK = false;
-
+  let basicUser = null;
+  const auth = req.headers.authorization || "";
   if (auth.toLowerCase().startsWith("basic ")) {
-    const b64 = auth.slice(6).trim();
     try {
-      const decoded = Buffer.from(b64, "base64").toString("utf8"); // "user:pass"
-      const i = decoded.indexOf(":");
-      const user = decoded.slice(0, i);
-      const pass = decoded.slice(i + 1);
-      basicOK = user === clientId && pass === consumerKey;
-    } catch (_) {
-      basicOK = false;
-    }
+      const raw = Buffer.from(auth.slice(6), "base64").toString("utf8");
+      const [user, pass] = raw.split(":");
+      basicUser = user || null;
+      if (user === clientId && pass === consumerKey) {
+        basicOK = true;
+      }
+    } catch (_) {}
   }
 
-  // ---- HMAC (opciono – pravi eventi) ----
+  // ---------- (OPCIONO) HMAC PROVERA ----------
   let hmacOK = false;
-  const sigHeader =
+  const sig =
     req.headers["x-snaptrade-hmac"] ||
     req.headers["x-snaptrade-signature"] ||
     req.headers["x-hub-signature-256"];
 
-  if (sigHeader) {
-    const raw = JSON.stringify(req.body || {});
-    const sent = String(sigHeader).replace(/^sha256=/, "").trim();
-    const digest = crypto
-      .createHmac("sha256", consumerKey)
-      .update(raw)
-      .digest("hex");
-    hmacOK = crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(digest));
+  if (sig) {
+    try {
+      const rawBody =
+        typeof req.body === "string" ? req.body : JSON.stringify(req.body || {});
+      const mac = crypto
+        .createHmac("sha256", consumerKey || "")
+        .update(rawBody)
+        .digest("hex");
+      const cleanSig = String(sig).replace(/^sha256=/i, "");
+      hmacOK = crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(cleanSig));
+    } catch (_) {}
   }
 
+  // ---------- AKO NIJE PROŠLA AUTORIZACIJA, VRATI DEBUG 401 ----------
   if (!(basicOK || hmacOK)) {
-    // za brzi debug možeš na kratko da loguješ auth prisustvo (NE tajne vrednosti!)
-    // console.log("no auth", { hasAuth: !!auth, hasSig: !!sigHeader });
-    return res.status(401).json({ ok: false, error: "Unauthorized" });
+    return res.status(401).json({
+      ok: false,
+      error: "Unauthorized",
+      hasAuth: !!auth,
+      hasSig: !!sig,
+      basicUser,                          // šta je stiglo kao Basic username
+      expectedClientId: clientId || null, // šta očekujemo
+      consumerKeyLen: (consumerKey || "").length // da li je key učitan iz env-a
+    });
   }
 
-  // OK – potvrdi prijem
-  res.status(200).json({ ok: true, received: true });
-
-  // (opciono) u pozadini pokreni sync na određene evente
-  // const event = req.body?.type;
-  // if (event === "ACCOUNT_SYNC_COMPLETED") { ... }
+  // ---------- SVE OK ----------
+  return res.status(200).json({ ok: true, received: true, basicOK, hmacOK });
 }
 
 
