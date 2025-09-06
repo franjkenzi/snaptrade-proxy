@@ -1,93 +1,54 @@
 // api/webhook.js
 import crypto from "crypto";
 
-export const config = {
-  api: { bodyParser: false }, // treba raw body za HMAC
-};
-
-function readRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk) => (data += chunk));
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
-  });
-}
-
-function timingSafeEqualHex(a, b) {
-  try {
-    const ba = Buffer.from(a, "hex");
-    const bb = Buffer.from(b, "hex");
-    return (
-      ba.length === bb.length &&
-      crypto.timingSafeEqual(ba, bb)
-    );
-  } catch (_) {
-    return false;
-  }
+function tSafe(a, b) {
+  const A = Buffer.from(a || "");
+  const B = Buffer.from(b || "");
+  if (A.length !== B.length) return false;
+  return crypto.timingSafeEqual(A, B);
 }
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const secret = process.env.SNAP_WEBHOOK_SECRET;
-  if (!secret) {
-    return res.status(500).json({ ok: false, error: "Missing webhook secret" });
-  }
+  // raw body (za HMAC). Ako je već objekat, stringify je ok za test.
+  const raw = typeof req.body === "string" ? req.body : JSON.stringify(req.body || {});
 
-  const raw = await readRawBody(req);
+  // 1) BASIC AUTH (ClientID:ConsumerKey)
+  const auth = req.headers["authorization"] || "";
+  const expected = "Basic " + Buffer.from(
+    `${process.env.SNAP_CLIENT_ID}:${process.env.SNAP_CONSUMER_KEY}`
+  ).toString("base64");
+  const basicOK = tSafe(auth, expected);
 
-  // <-- proveri u dokumentaciji tačan naziv headera.
-  // Najčešće bude nešto tipa 'x-snaptrade-hmac-sha256' ili slično.
+  // 2) HMAC (nekad dolazi kao x-snaptrade-hmac / x-snaptrade-signature / x-hub-signature-256)
   const sigHeader =
-    req.headers["x-snaptrade-hmac-sha256"] ||
-    req.headers["x-signature"] ||
-    req.headers["x-hub-signature-256"] ||
-    "";
-
-  const computed = crypto
-    .createHmac("sha256", secret)
-    .update(raw)
-    .digest("hex");
-
-  if (!timingSafeEqualHex(sigHeader, computed)) {
-    // Ako potpis ne prođe, ne obrađuj poziv
-    return res.status(401).json({ ok: false, error: "Invalid signature" });
+    req.headers["x-snaptrade-hmac"] ||
+    req.headers["x-snaptrade-signature"] ||
+    req.headers["x-hub-signature-256"];
+  let hmacOK = false;
+  if (sigHeader) {
+    const sent = String(sigHeader).replace(/^sha256=/, "").trim();
+    const digest = crypto.createHmac("sha256", process.env.SNAP_CONSUMER_KEY).update(raw).digest("hex");
+    hmacOK = tSafe(sent, digest);
   }
 
-  let event;
-  try {
-    event = JSON.parse(raw);
-  } catch (e) {
-    return res.status(400).json({ ok: false, error: "Invalid JSON" });
+  if (!(basicOK || hmacOK)) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
   }
 
-  // 1) Log – da vidiš tačno koje tipove eventa dobijamo i kakav je payload
-  console.log("SNAPTRADE_WEBHOOK_EVENT", {
-    type: event?.type || event?.event || "unknown",
-    keys: Object.keys(event || {}),
-    preview: JSON.stringify(event).slice(0, 500),
-  });
+  // OK – primi event
+  const event = req.body?.type || "unknown";
+  console.log("SnapTrade webhook:", { event, body: req.body });
 
-  // 2) Pošalji u Bubble backend workflow
-  //    Kreiraj u Bubble-u API Workflow PRIHVATNI endpoint, i stavi ga u env:
-  //    BUBBLE_WEBHOOK_URL, npr: https://appname.bubbleapps.io/version-test/api/1.1/wf/snaptrade_webhook
-  const bubbleUrl = process.env.BUBBLE_WEBHOOK_URL; // <-- dodaj u Vercel env
-  if (bubbleUrl) {
-    try {
-      await fetch(bubbleUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: raw, // prosledi ceo originalan event
-      });
-    } catch (err) {
-      console.error("Bubble forward failed:", err);
-      // i dalje vraćamo 200 da SnapTrade ne retrajuje bezveze
-    }
-  }
+  // Odmah potvrdi prijem (SnapTrade očekuje 2xx)
+  res.status(200).json({ ok: true, received: true });
 
-  // Vrati brzo 200 (SnapTrade očekuje brz odgovor)
-  return res.status(200).json({ ok: true });
+  // (opciono) fire-and-forget: na određene evente pokreni sync u pozadini
+  // if (event === "ACCOUNT_SYNC_COMPLETED") {
+  //   fetch(`${process.env.PROXY_BASE_URL}/api/positions?userId=...&userSecret=...&accountId=...`).catch(()=>{});
+  // }
 }
+
