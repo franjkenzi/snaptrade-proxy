@@ -1,64 +1,79 @@
-// api/webhook.js
+// /api/webhook.js
 import crypto from "crypto";
+
+function parseBasic(req) {
+  const auth = req.headers.authorization || "";
+  if (!auth.toLowerCase().startsWith("basic ")) return { user: null, pass: null };
+  try {
+    const raw = Buffer.from(auth.slice(6), "base64").toString("utf8"); // "user:pass"
+    const i = raw.indexOf(":");
+    const user = i === -1 ? raw : raw.slice(0, i);
+    const pass = i === -1 ? "" : raw.slice(i + 1);
+    return { user, pass };
+  } catch {
+    return { user: null, pass: null };
+  }
+}
+
+function checkBasic(req) {
+  const { user, pass } = parseBasic(req);
+  return (
+    user === process.env.SNAP_CLIENT_ID &&
+    pass === process.env.SNAP_CONSUMER_KEY
+  );
+}
+
+function checkHmac(req, rawBody) {
+  const secret = process.env.SNAP_WEBHOOK_SECRET;
+  const sig =
+    req.headers["x-snaptrade-hmac"] || req.headers["x-hub-signature-256"];
+  if (!secret || !sig) return false;
+
+  // NAPOMENA: za pravu HMAC verifikaciju najbolje je koristiti *raw* body.
+  // Za test dugme (SnapTrade "Test webhook") HMAC se obično ne šalje.
+  const body = typeof rawBody === "string" ? rawBody : JSON.stringify(rawBody || {});
+  const h = crypto.createHmac("sha256", secret).update(body).digest("hex");
+  const expected = sig.startsWith("sha256=") ? `sha256=${h}` : h;
+
+  try {
+    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
-  const clientId = process.env.SNAP_CLIENT_ID;       // npr. KOVAC-DIG-TEST-EXJOH
-  const consumerKey = process.env.SNAP_CONSUMER_KEY; // tajni key iz SnapTrade-a
+  const basicOK = checkBasic(req);
+  const hmacOK = checkHmac(req, req.body);
 
-  // ---------- BASIC AUTH PROVERA ----------
-  let basicOK = false;
-  let basicUser = null;
-  const auth = req.headers.authorization || "";
-  if (auth.toLowerCase().startsWith("basic ")) {
-    try {
-      const raw = Buffer.from(auth.slice(6), "base64").toString("utf8");
-      const [user, pass] = raw.split(":");
-      basicUser = user || null;
-      if (user === clientId && pass === consumerKey) {
-        basicOK = true;
-      }
-    } catch (_) {}
-  }
-
-  // ---------- (OPCIONO) HMAC PROVERA ----------
-  let hmacOK = false;
-  const sig =
-    req.headers["x-snaptrade-hmac"] ||
-    req.headers["x-snaptrade-signature"] ||
-    req.headers["x-hub-signature-256"];
-
-  if (sig) {
-    try {
-      const rawBody =
-        typeof req.body === "string" ? req.body : JSON.stringify(req.body || {});
-      const mac = crypto
-        .createHmac("sha256", consumerKey || "")
-        .update(rawBody)
-        .digest("hex");
-      const cleanSig = String(sig).replace(/^sha256=/i, "");
-      hmacOK = crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(cleanSig));
-    } catch (_) {}
-  }
-
-  // ---------- AKO NIJE PROŠLA AUTORIZACIJA, VRATI DEBUG 401 ----------
+  // DOZVOLI: Basic OR HMAC
   if (!(basicOK || hmacOK)) {
+    const { user } = parseBasic(req);
     return res.status(401).json({
       ok: false,
       error: "Unauthorized",
-      hasAuth: !!auth,
-      hasSig: !!sig,
-      basicUser,                          // šta je stiglo kao Basic username
-      expectedClientId: clientId || null, // šta očekujemo
-      consumerKeyLen: (consumerKey || "").length // da li je key učitan iz env-a
+      hasAuth: !!req.headers.authorization,
+      hasSig: !!(req.headers["x-snaptrade-hmac"] || req.headers["x-hub-signature-256"]),
+      basicUser: user,
+      expectedClientId: process.env.SNAP_CLIENT_ID,
+      consumerKeyLen: (process.env.SNAP_CONSUMER_KEY || "").length,
+      basicOK,
+      hmacOK,
     });
   }
 
-  // ---------- SVE OK ----------
-  return res.status(200).json({ ok: true, received: true, basicOK, hmacOK });
+  // "Test webhook" ping
+  if (req.body && req.body.ping) {
+    return res.json({ ok: true, pong: true });
+  }
+
+  // TODO: ovde obradjuj stvarne evente (connection.updated, transactions.sync.completed, itd.)
+  return res.json({ ok: true });
 }
+
 
 
