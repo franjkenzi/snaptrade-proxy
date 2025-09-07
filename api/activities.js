@@ -7,118 +7,186 @@ function pickError(err) {
   return { status, data };
 }
 
+// pom. ISO now i -X meseci
+const toISO = (d) => (d instanceof Date ? d.toISOString() : new Date(d).toISOString());
+
 export default async function handler(req, res) {
+  // Samo GET
   if (req.method !== "GET") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
     const { userId, userSecret, accountId, start, end, cursor, peek } = req.query;
+
+    // Debug mod – vrati koje su klase i metode dostupne u SDK-u
+    if (peek === "1") {
+      const keys = (o) =>
+        o
+          ? Object.keys(Object.getOwnPropertyNames(Object.getPrototypeOf(o))
+              .reduce((acc, k) => ({ ...acc, [k]: true }), {}))
+            .filter((k) => typeof o[k] === "function" && k !== "constructor")
+          : [];
+      return res.status(200).json({
+        ok: true,
+        debug: {
+          sdkKeys: Object.keys(snaptrade || {}),
+          activitiesKeys: keys(snaptrade.activities),
+          accountActivitiesKeys: keys(snaptrade.accountInformation),
+          transactionsKeys: keys(snaptrade.transactions),
+        },
+      });
+    }
+
     if (!userId || !userSecret || !accountId) {
       return res
         .status(400)
         .json({ ok: false, error: "Missing userId, userSecret or accountId" });
     }
 
-    // default range: poslednjih 12 meseci (po želji skrati na 90 dana)
-    const startISO = start || new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString();
-    const endISO = end || new Date().toISOString();
+    // Default opseg: poslednja 3 meseca (možeš promeniti)
+    const startISO = start || toISO(new Date(Date.now() - 90 * 24 * 3600 * 1000));
+    const endISO   = end   || toISO(new Date());
 
-    // Servisi koji mogu da postoje u različitim buildovima SDK-a
-    const activitiesSvc =
-      snaptrade.activities || snaptrade.accountActivities || snaptrade.activity || null;
-    const transactionsSvc = snaptrade.transactions || null;
-
-    // Kandidati po raznim imenima funkcija kroz verzije SDK-a
-    const fnCandidates = [
-      // "activities" stil (stariji buildovi)
-      activitiesSvc?.listUserAccountActivities,
-      activitiesSvc?.listActivitiesForAccount,
-      activitiesSvc?.listActivities,
-      activitiesSvc?.getActivities,
-
-      // "transactions" stil (noviji buildovi)
-      transactionsSvc?.listUserAccountTransactions,
-      transactionsSvc?.listTransactionsForAccount,
-      transactionsSvc?.listUserTransactions,
-      transactionsSvc?.getTransactionsForAccount,
-      transactionsSvc?.getUserTransactions,
-      transactionsSvc?.getTransactions,
+    // --------- PRONAĐI FUNKCIJU KOJA POSTOJI U TVOM BUILDU ---------
+    // Pokušavamo najpre u 'transactions', pa u 'accountInformation'
+    const svcOrder = [
+      ["transactions", snaptrade.transactions],
+      ["accountInformation", snaptrade.accountInformation],
     ];
 
-    const picked = fnCandidates.find((f) => typeof f === "function");
+    // Lista mogućih imena metoda kroz različite buildove
+    const candidateNames = [
+      "listUserAccountTransactions",
+      "listAccountTransactions",
+      "getUserAccountTransactions",
+      "getAccountTransactions",
+      "listUserAccountActivities",
+      "listActivitiesForAccount",
+      "listActivities",
+      "getActivities",
+    ];
 
-    // Peek režim – samo vrati šta postoji da vidiš u logu
-    if (peek === "1") {
-      return res.status(200).json({
-        ok: true,
-        debug: {
-          sdkKeys: Object.keys(snaptrade || {}),
-          activitiesKeys: Object.keys(activitiesSvc || {}),
-          transactionsKeys: Object.keys(transactionsSvc || {}),
-          picked: picked ? picked.name : null,
-        },
-      });
+    let svcName = null;
+    let fnName = null;
+    let fn = null;
+
+    for (const [name, svc] of svcOrder) {
+      if (!svc) continue;
+      for (const cand of candidateNames) {
+        if (typeof svc[cand] === "function") {
+          svcName = name;
+          fnName = cand;
+          fn = svc[cand].bind(svc);
+          break;
+        }
+      }
+      if (fn) break;
     }
 
-    if (!picked) {
+    if (!fn) {
       return res.status(500).json({
         ok: false,
-        error: "No activities/transactions function found in this SDK build",
+        error:
+          "No activities/transactions function found in this SDK build (call with '?peek=1' to inspect keys)",
         debug: {
           sdkKeys: Object.keys(snaptrade || {}),
-          activitiesKeys: Object.keys(activitiesSvc || {}),
-          transactionsKeys: Object.keys(transactionsSvc || {}),
+          activitiesKeys: snaptrade.activities ? Object.keys(snaptrade.activities) : [],
+          accountActivitiesKeys: snaptrade.accountInformation
+            ? Object.keys(snaptrade.accountInformation)
+            : [],
+          transactionsKeys: snaptrade.transactions ? Object.keys(snaptrade.transactions) : [],
         },
       });
     }
 
-    // Poziv – većina SDK funkcija prima isti objekt parametara
-    const resp = await picked.call(activitiesSvc || transactionsSvc, {
+    // Argument objekat – šaljemo superset polja; SDK će uzeti ona koja mu trebaju
+    const args = {
       userId,
       userSecret,
       accountId,
+      accountID: accountId,      // neki buildovi očekuju drugačiji ključ
       startTime: startISO,
       endTime: endISO,
+      startDate: startISO,
+      endDate: endISO,
       cursor,
-    });
+    };
 
+    const resp = await fn(args);
     const payload = resp?.data ?? resp;
 
-    // U zavisnosti od rute, podaci mogu biti u različitim ključevima:
-    const raw =
-      payload?.activities ??
-      payload?.transactions ??
-      payload?.data ??
-      payload?.results ??
-      payload?.items ??
-      payload;
+    // Normalizuj na unified listu
+    const rawList =
+      payload?.transactions ||
+      payload?.activities ||
+      payload?.data ||
+      payload ||
+      [];
 
-    const list = Array.isArray(raw) ? raw : [];
+    const items = (Array.isArray(rawList) ? rawList : []).map((t) => {
+      // pokušaj sa najčešćim ključevima
+      const id =
+        t.id || t.transactionId || t.activityId || t.externalId || t.uuid || null;
 
-    // Normalizacija – mapiraj različita polja na isto
-    const items = list.map((t) => ({
-      id: t.id || t.activityId || t.transactionId || t.externalId,
-      accountId,
-      symbol: t.symbol || t.ticker || t.securitySymbol || "",
-      side: String(t.action || t.type || t.transactionType || "").toUpperCase(), // BUY/SELL/DIVIDEND...
-      quantity: Number(t.units ?? t.quantity ?? 0),
-      price: Number(t.price ?? t.unitPrice ?? 0),
-      amount: Number(t.amount ?? t.netAmount ?? 0),
-      currency: t.currency || t.currencyCode || "USD",
-      executedAt: t.tradeDate || t.transactionDate || t.timestamp || t.date,
-      fees: Number(t.fees ?? t.totalFees ?? 0),
-      raw: t, // original, za svaki slučaj
-    }));
+      const symbol =
+        t.symbol ||
+        t.ticker ||
+        t.security?.symbol ||
+        t.instrument?.symbol ||
+        "";
+
+      const side =
+        (t.side || t.action || t.type || t.transactionType || "").toString().toUpperCase();
+
+      const quantity = Number(
+        t.units ?? t.quantity ?? t.shares ?? t.amountUnits ?? 0
+      );
+
+      const price = Number(t.price ?? t.unitPrice ?? 0);
+      const amount = Number(t.amount ?? t.netAmount ?? t.grossAmount ?? 0);
+      const currency = t.currency || t.currencyCode || "USD";
+
+      const executedAt =
+        t.tradeDate ||
+        t.transactionDate ||
+        t.timestamp ||
+        t.date ||
+        t.executedAt ||
+        null;
+
+      const fees = Number(t.fees ?? t.totalFees ?? 0);
+
+      return {
+        id,
+        accountId,
+        symbol,
+        side,
+        quantity,
+        price,
+        amount,
+        currency,
+        executedAt,
+        fees,
+        raw: t,
+      };
+    });
+
+    // next cursor/pagination
+    const nextCursor =
+      payload?.next || payload?.pagination?.next || payload?.cursor?.next || null;
 
     return res.status(200).json({
       ok: true,
+      used: { svc: svcName, fn: fnName },
       items,
-      nextCursor: payload?.next ?? payload?.nextCursor ?? null,
+      nextCursor,
+      count: items.length,
     });
   } catch (err) {
     const { status, data } = pickError(err);
     return res.status(status).json({ ok: false, error: data });
   }
 }
+
 
