@@ -1,71 +1,64 @@
 // /api/_client.js
-// Koristi isti paket koji već imaš u package.json
-import * as SnapTradePkg from "snaptrade-typescript-sdk";
-// Ako koristiš scoped paket, promeni na:
-// import * as SnapTradePkg from "@snaptrade/snaptrade-typescript-sdk";
+import SnapTradePkg from "snaptrade-typescript-sdk";
 
+// SDK objekat (CJS/ESM kompatibilno)
 const SDK = SnapTradePkg?.default ?? SnapTradePkg;
+
+// Helper – uzmi prvu "klasu" koja postoji
 const pickCtor = (...candidates) => candidates.find((c) => typeof c === "function");
 
-// --- Konfiguracija (radi i za različite buildove)
-const makeConfig = () => {
-  if (typeof SDK?.createConfiguration === "function") {
-    return SDK.createConfiguration({
-      consumerKey: process.env.SNAP_CONSUMER_KEY,
-      clientId: process.env.SNAP_CLIENT_ID,
-    });
-  }
-  if (typeof SDK?.Configuration === "function") {
-    return new SDK.Configuration({
-      consumerKey: process.env.SNAP_CONSUMER_KEY,
-      clientId: process.env.SNAP_CLIENT_ID,
-    });
-  }
+// Configuration helper (createConfiguration ili Configuration)
+const createConfiguration =
+  typeof SDK?.createConfiguration === "function" ? SDK.createConfiguration : null;
+const ConfigurationCtor =
+  typeof SDK?.Configuration === "function" ? SDK.Configuration : null;
+
+if (!createConfiguration && !ConfigurationCtor) {
   throw new Error("SnapTrade SDK: Configuration helper not found");
-};
+}
 
-const config = makeConfig();
+const config = createConfiguration
+  ? createConfiguration({
+      consumerKey: process.env.SNAP_CONSUMER_KEY,
+      clientId: process.env.SNAP_CLIENT_ID,
+    })
+  : new ConfigurationCtor({
+      consumerKey: process.env.SNAP_CONSUMER_KEY,
+      clientId: process.env.SNAP_CLIENT_ID,
+    });
 
-// --- Core moduli (mora da postoji)
-const ApiStatusApiCtor = pickCtor(SDK.ApiStatusApi, SDK.APIStatusApi);
-const AuthenticationApiCtor = pickCtor(SDK.AuthenticationApi);
+// Pokušaji za razne buildove SDK-a (imena klasa variraju)
+const ApiStatusApiCtor       = pickCtor(SDK.ApiStatusApi, SDK.APIStatusApi);
+const AuthenticationApiCtor  = pickCtor(SDK.AuthenticationApi);
 const AccountInformationCtor = pickCtor(
   SDK.AccountInformationApi,
   SDK.AccountsApi,
   SDK.AccountInformationApiGenerated
 );
+// >>> NOVO: Transactions (u ovom buildu je to klasa za activities/transactions)
+const TransactionsApiCtor    = pickCtor(
+  SDK.TransactionsApi,
+  SDK.TransactionApi,
+  SDK.AccountTransactionsApi,
+  SDK.ActivitiesApi,           // fallback, ako je build ovo nazvao ActivitiesApi
+  SDK.AccountActivitiesApi     // još jedan mogući naziv
+);
 
 if (!ApiStatusApiCtor || !AuthenticationApiCtor || !AccountInformationCtor) {
   const keys = Object.keys(SDK || {}).join(", ");
-  throw new Error(`SnapTrade SDK: One or more core API classes not found. Exports: [${keys}]`);
+  throw new Error(
+    `SnapTrade SDK: One or more API classes not found in this build. Exports: [${keys}]`
+  );
 }
 
-// --- Activities / Transactions moduli (nazivi variraju po verziji – hvatamo više)
-const ActivitiesCtor = pickCtor(
-  SDK.ActivitiesApi,
-  SDK.AccountActivitiesApi,
-  SDK.AccountActivityApi,
-  SDK.ActivityApi,
-  SDK.ActivitiesApiGenerated
-);
-
-const TransactionsCtor = pickCtor(
-  SDK.TransactionsAndReportingApi,
-  SDK.TransactionsApi,
-  SDK.ReportingApi,
-  SDK.TransactionsAndReportingApiGenerated
-);
-
-// --- Sastavi klijent
+// Napravi instancirane klijente
 const snaptrade = {
-  apiStatus: new ApiStatusApiCtor(config),
-  authentication: new AuthenticationApiCtor(config),
+  apiStatus:          new ApiStatusApiCtor(config),
+  authentication:     new AuthenticationApiCtor(config),
   accountInformation: new AccountInformationCtor(config),
+  // Ako Transactions klasa postoji u ovom buildu – koristi je
+  ...(TransactionsApiCtor ? { transactions: new TransactionsApiCtor(config) } : {}),
 };
-
-// Dodaj opcione grane samo ako postoje u ovom buildu
-if (ActivitiesCtor)      snaptrade.accountActivities = new ActivitiesCtor(config);
-if (TransactionsCtor)    snaptrade.transactions      = new TransactionsCtor(config);
 
 export default snaptrade;
 
