@@ -1,6 +1,6 @@
 // /api/webhooks/snaptrade.js
 import crypto from "crypto";
-import snaptrade from "../api/_client.js"; // isti klijent koji već koristiš
+import snaptrade from "../_client.js"; // isti klijent koji već koristiš
 
 // ---------- pomoćne:
 const OK = (res, json = { ok: true }) => res.status(200).json(json);
