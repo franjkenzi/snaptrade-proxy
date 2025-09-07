@@ -1,85 +1,52 @@
-// /api/webhooks/snaptrade.js
-import crypto from "crypto";
-
-// Ako koristiš Next/Vercel Node funkcije, ovo gasi default parser,
-// kako bismo dobili sirov body (bitno za HMAC).
+// Vercel (Node) API route
 export const config = { api: { bodyParser: false } };
 
-function readRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    req.setEncoding("utf8");
-    req.on("data", chunk => (data += chunk));
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
+function readBody(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      try { resolve(JSON.parse(raw || "{}")); } catch { resolve({}); }
+    });
   });
+}
+
+function headerSecret(req) {
+  const h = req.headers || {};
+  // Node ih već spušta na lowercase
+  return (
+    h["x-webhook-secret"] ||
+    h["x-snaptrade-webhook-secret"] ||
+    h["x-snaptrade-secret"] ||
+    h["webhook-secret"] ||
+    h["snaptrade-webhook-secret"]
+  );
 }
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    return res.status(405).json({ ok: false, error: "method_not_allowed" });
   }
 
-  const secret = process.env.SNAPTRADE_WEBHOOK_SECRET;
-  const raw = await readRawBody(req);
+  const expected = String(process.env.SNAPTRADE_WEBHOOK_SECRET || "").trim();
+  const provided = String(headerSecret(req) || "").trim();
 
-  // Normalizuj headere (lowercase)
-  const headers = Object.fromEntries(
-    Object.entries(req.headers || {}).map(([k, v]) => [k.toLowerCase(), v])
-  );
-
-  // Probaj sve uobičajene varijante headera koje provajderi koriste
-  const signature =
-    headers["x-snaptrade-signature"] ||
-    headers["snaptrade-signature"] ||
-    headers["x-snaptrade-hmac"] ||
-    headers["x-webhook-signature"] ||
-    headers["x-snaptrade-secret"] ||
-    headers["x-webhook-secret"];
-
-  // >>> DEBUG: videćemo tačno koje headere šalju (bez raw secreta)
-  console.log("snaptrade webhook headers (keys):", Object.keys(headers));
-  console.log("received signature header name/value preview:", signature?.toString().slice(0, 12));
-
-  let verified = false;
-
-  // 1) Plain secret (neki servisi šalju secret direktno u headeru)
-  if (signature && secret && signature === secret) {
-    verified = true;
-    console.log("Webhook verified via plain secret header.");
+  if (!expected || !provided || provided !== expected) {
+    // Blaga dijagnostika bez otkrivanja vrednosti
+    return res.status(401).json({
+      ok: false,
+      error: "invalid_or_missing_secret",
+      gotHeader: Boolean(provided),
+    });
   }
 
-  // 2) HMAC-SHA256(rawBody, secret) u hex
-  if (!verified && signature && secret) {
-    try {
-      const h = crypto.createHmac("sha256", secret).update(raw).digest("hex");
-      if (signature === h) {
-        verified = true;
-        console.log("Webhook verified via HMAC-SHA256.");
-      }
-    } catch (e) {
-      console.error("HMAC verify error:", e);
-    }
-  }
+  const event = await readBody(req);
 
-  // PRIVREMENO: možeš dozvoliti prolaz bez verifikacije kad postaviš env flag
-  // ALLOW_INSECURE_WEBHOOK=1 (samo za test, posle ugasi!)
-  const allowInsecure = process.env.ALLOW_INSECURE_WEBHOOK === "1";
-  if (!verified && !allowInsecure) {
-    return res.status(401).json({ ok: false, reason: "bad signature" });
-  }
+  // --- ovde radi šta želiš sa događajem ---
+  // npr. samo potvrdi prijem, a kasnije proširi
+  // console.log("SnapTrade event:", event?.type, event?.eventId);
 
-  // Parse payload (ako nije JSON, samo ostavi kao raw)
-  let payload = null;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    payload = { raw };
-  }
-
-  console.log("snaptrade webhook payload preview:", payload?.type || Object.keys(payload || {}));
-
-  // TODO: ovde radiš svoju logiku: upiši status u bazu itd.
   return res.status(200).json({ ok: true });
 }
 
