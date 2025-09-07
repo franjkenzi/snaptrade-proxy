@@ -13,104 +13,102 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ── Query parametri (svi opcioni za peek=1)
-    const {
-      userId,
-      userSecret,
-      accountId,
-      start,
-      end,
-      cursor,
-      peek,
-    } = req.query;
+    const { userId, userSecret, accountId, start, end, cursor, peek } = req.query;
+    if (!userId || !userSecret || !accountId) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing userId, userSecret or accountId" });
+    }
 
-    // ── Pripremi default period (90 dana unazad) i ISO žice
-    const startISO = start ? new Date(start).toISOString()
-                           : new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString();
-    const endISO   = end   ? new Date(end).toISOString()
-                           : new Date().toISOString();
+    // default range: poslednjih 12 meseci (po želji skrati na 90 dana)
+    const startISO = start || new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString();
+    const endISO = end || new Date().toISOString();
 
-    // ── Probaj sve moguće “grupe” i nazive funkcija (varira po SDK verziji)
-    const svc =
-      snaptrade.activities ||
-      snaptrade.accountActivities ||
-      snaptrade.activity ||
-      {};
+    // Servisi koji mogu da postoje u različitim buildovima SDK-a
+    const activitiesSvc =
+      snaptrade.activities || snaptrade.accountActivities || snaptrade.activity || null;
+    const transactionsSvc = snaptrade.transactions || null;
 
-    const fn =
-      svc.listUserAccountActivities ||
-      svc.listActivitiesForAccount ||
-      svc.listActivities ||
-      svc.getActivities;
+    // Kandidati po raznim imenima funkcija kroz verzije SDK-a
+    const fnCandidates = [
+      // "activities" stil (stariji buildovi)
+      activitiesSvc?.listUserAccountActivities,
+      activitiesSvc?.listActivitiesForAccount,
+      activitiesSvc?.listActivities,
+      activitiesSvc?.getActivities,
 
-    // ── Ako nismo našli funkciju: prikaži dostupne ključeve (peek=1)
-    if (typeof fn !== "function") {
-      const snapshot = {
-        sdkKeys: Object.keys(snaptrade || {}),
-        activitiesKeys: Object.keys(snaptrade?.activities || {}),
-        accountActivitiesKeys: Object.keys(snaptrade?.accountActivities || {}),
-        activityKeys: Object.keys(snaptrade?.activity || {}),
-      };
+      // "transactions" stil (noviji buildovi)
+      transactionsSvc?.listUserAccountTransactions,
+      transactionsSvc?.listTransactionsForAccount,
+      transactionsSvc?.listUserTransactions,
+      transactionsSvc?.getTransactionsForAccount,
+      transactionsSvc?.getUserTransactions,
+      transactionsSvc?.getTransactions,
+    ];
 
-      if (peek === "1") {
-        return res.status(200).json({ ok: true, debug: snapshot });
-      }
+    const picked = fnCandidates.find((f) => typeof f === "function");
 
-      console.error("ACTIVITIES_FN_NOT_FOUND", snapshot);
+    // Peek režim – samo vrati šta postoji da vidiš u logu
+    if (peek === "1") {
+      return res.status(200).json({
+        ok: true,
+        debug: {
+          sdkKeys: Object.keys(snaptrade || {}),
+          activitiesKeys: Object.keys(activitiesSvc || {}),
+          transactionsKeys: Object.keys(transactionsSvc || {}),
+          picked: picked ? picked.name : null,
+        },
+      });
+    }
+
+    if (!picked) {
       return res.status(500).json({
         ok: false,
-        error:
-          "Activities function not found in SDK (call with ?peek=1 to inspect keys)",
+        error: "No activities/transactions function found in this SDK build",
+        debug: {
+          sdkKeys: Object.keys(snaptrade || {}),
+          activitiesKeys: Object.keys(activitiesSvc || {}),
+          transactionsKeys: Object.keys(transactionsSvc || {}),
+        },
       });
     }
 
-    // ── Za stvarni poziv obavezni su userId, userSecret, accountId
-    if (!userId || !userSecret || !accountId) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing userId, userSecret or accountId",
-      });
-    }
-
-    // ── Poziv SDK-a (šaljemo i alternativne nazive ključeva za datume)
-    const args = {
+    // Poziv – većina SDK funkcija prima isti objekt parametara
+    const resp = await picked.call(activitiesSvc || transactionsSvc, {
       userId,
       userSecret,
       accountId,
       startTime: startISO,
       endTime: endISO,
-      startDate: startISO,
-      endDate: endISO,
       cursor,
-    };
+    });
 
-    const resp = await fn.call(svc, args);
     const payload = resp?.data ?? resp;
 
-    // ── Izvuci listu stavki (različite strukture po verziji)
-    const rawList =
-      payload?.activities ||
-      payload?.data ||
-      (Array.isArray(payload) ? payload : []);
+    // U zavisnosti od rute, podaci mogu biti u različitim ključevima:
+    const raw =
+      payload?.activities ??
+      payload?.transactions ??
+      payload?.data ??
+      payload?.results ??
+      payload?.items ??
+      payload;
 
-    const items = (rawList || []).map((a) => ({
-      id: a.id || a.activityId || a.externalId || a.uuid || null,
+    const list = Array.isArray(raw) ? raw : [];
+
+    // Normalizacija – mapiraj različita polja na isto
+    const items = list.map((t) => ({
+      id: t.id || t.activityId || t.transactionId || t.externalId,
       accountId,
-      symbol: a.symbol || a.ticker || a.security?.symbol || "",
-      side: String(a.action || a.type || a.side || "").toUpperCase(), // BUY / SELL / DIVIDEND ...
-      quantity: Number(a.units ?? a.quantity ?? a.shares ?? 0),
-      price: Number(a.price ?? a.unitPrice ?? 0),
-      amount: Number(a.amount ?? a.netAmount ?? a.grossAmount ?? 0),
-      currency: a.currency || a.currencyCode || a.settlementCurrency || "USD",
-      executedAt:
-        a.tradeDate ||
-        a.transactionDate ||
-        a.timestamp ||
-        a.date ||
-        a.executedAt ||
-        null,
-      fees: Number(a.fees ?? a.commissions ?? 0),
-      raw: a, // kompletan original, za svaki slučaj
+      symbol: t.symbol || t.ticker || t.securitySymbol || "",
+      side: String(t.action || t.type || t.transactionType || "").toUpperCase(), // BUY/SELL/DIVIDEND...
+      quantity: Number(t.units ?? t.quantity ?? 0),
+      price: Number(t.price ?? t.unitPrice ?? 0),
+      amount: Number(t.amount ?? t.netAmount ?? 0),
+      currency: t.currency || t.currencyCode || "USD",
+      executedAt: t.tradeDate || t.transactionDate || t.timestamp || t.date,
+      fees: Number(t.fees ?? t.totalFees ?? 0),
+      raw: t, // original, za svaki slučaj
     }));
 
     return res.status(200).json({
