@@ -1,13 +1,9 @@
 // /api/_client.js
 import SnapTradePkg from "snaptrade-typescript-sdk";
 
-// SDK objekat (CJS/ESM kompatibilno)
 const SDK = SnapTradePkg?.default ?? SnapTradePkg;
-
-// Helper – uzmi prvu "klasu" koja postoji
 const pickCtor = (...candidates) => candidates.find((c) => typeof c === "function");
 
-// Configuration helper (createConfiguration ili Configuration)
 const createConfiguration =
   typeof SDK?.createConfiguration === "function" ? SDK.createConfiguration : null;
 const ConfigurationCtor =
@@ -27,7 +23,7 @@ const config = createConfiguration
       clientId: process.env.SNAP_CLIENT_ID,
     });
 
-// Pokušaji za razne buildove SDK-a (imena klasa variraju)
+// Core
 const ApiStatusApiCtor       = pickCtor(SDK.ApiStatusApi, SDK.APIStatusApi);
 const AuthenticationApiCtor  = pickCtor(SDK.AuthenticationApi);
 const AccountInformationCtor = pickCtor(
@@ -35,28 +31,27 @@ const AccountInformationCtor = pickCtor(
   SDK.AccountsApi,
   SDK.AccountInformationApiGenerated
 );
-// >>> NOVO: Transactions (u ovom buildu je to klasa za activities/transactions)
-const TransactionsApiCtor    = pickCtor(
+
+// >>> Transactions / Activities (više mogućih naziva po build-u)
+const TransactionsApiCtor = pickCtor(
+  SDK.TransactionsAndReportingApi,
+  SDK.TransactionsAndReportingApiGenerated,
   SDK.TransactionsApi,
   SDK.TransactionApi,
   SDK.AccountTransactionsApi,
-  SDK.ActivitiesApi,           // fallback, ako je build ovo nazvao ActivitiesApi
-  SDK.AccountActivitiesApi     // još jedan mogući naziv
+  SDK.ActivitiesApi,
+  SDK.AccountActivitiesApi
 );
 
 if (!ApiStatusApiCtor || !AuthenticationApiCtor || !AccountInformationCtor) {
   const keys = Object.keys(SDK || {}).join(", ");
-  throw new Error(
-    `SnapTrade SDK: One or more API classes not found in this build. Exports: [${keys}]`
-  );
+  throw new Error(`SnapTrade SDK: One or more API classes not found in this build. Exports: [${keys}]`);
 }
 
-// Napravi instancirane klijente
 const snaptrade = {
   apiStatus:          new ApiStatusApiCtor(config),
   authentication:     new AuthenticationApiCtor(config),
   accountInformation: new AccountInformationCtor(config),
-  // Ako Transactions klasa postoji u ovom buildu – koristi je
   ...(TransactionsApiCtor ? { transactions: new TransactionsApiCtor(config) } : {}),
 };
 
