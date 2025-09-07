@@ -1,87 +1,105 @@
 // /api/webhooks/snaptrade.js
+import crypto from "crypto";
+
 export const config = { api: { bodyParser: false } };
 
-// --- helpers ---
-function readBody(req) {
+// ---- helpers ----
+function readRawBody(req) {
   return new Promise((resolve) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
-      const raw = Buffer.concat(chunks).toString("utf8");
-      try { resolve(JSON.parse(raw || "{}")); } catch { resolve({}); }
-    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
   });
 }
 
-function pickSecretFromHeaders(req) {
+// Vrati potpis iz headera (pokrivamo više mogućih naziva + Bearer fallback)
+function getIncomingSignature(req) {
   const h = req.headers || {};
-  // različite moguće varijante koje smo viđali
-  const direct =
-    h["x-webhook-secret"] ||
-    h["x-snaptrade-webhook-secret"] ||
-    h["x-snaptrade-secret"] ||
-    h["webhook-secret"] ||
-    h["snaptrade-webhook-secret"];
 
-  if (direct) return String(direct);
-
-  // neke integracije šalju Bearer <secret>
-  const auth = h["authorization"];
-  if (auth) {
-    const m = /^Bearer\s+(.+)$/i.exec(String(auth));
-    if (m) return m[1];
-  }
-  return null;
+  // Najčešća imena koja koriste provajderi:
+  return (
+    h["x-snaptrade-hmac-sha256"] ||
+    h["snaptrade-hmac-sha256"] ||
+    h["x-snaptrade-signature"] ||
+    h["snaptrade-signature"] ||
+    // fallback: Authorization: Bearer <signature>
+    (typeof h.authorization === "string" &&
+      /^Bearer\s+(.+)$/i.exec(h.authorization)?.[1]) ||
+    null
+  );
 }
 
-function sanitize(str) {
-  if (!str) return null;
-  const s = String(str);
-  if (s.length <= 4) return s;
-  return s.slice(0, 2) + "…" + s.slice(-2);
+// Sigurno poređenje (sprečava timing napade)
+function safeEqual(a, b) {
+  const A = Buffer.from(String(a) || "", "utf8");
+  const B = Buffer.from(String(b) || "", "utf8");
+  if (A.length !== B.length) return false;
+  return crypto.timingSafeEqual(A, B);
 }
 
-// --- handler ---
 export default async function handler(req, res) {
-  const expected = String(process.env.SNAPTRADE_WEBHOOK_SECRET || "").trim();
-  const provided = String(pickSecretFromHeaders(req) || "").trim();
-
-  // pripremi debug info (bez otkrivanja tajne)
-  const debug = {
-    method: req.method,
-    expectedLen: expected.length,
-    providedLen: provided.length,
-    providedPreview: sanitize(provided),
-    // pokaži sve "x-" headere + sve koji sadrže "secret" (da vidimo šta zaista dolazi)
-    seenHeaders: Object.fromEntries(
-      Object.entries(req.headers || {}).filter(
-        ([k]) => k.startsWith("x-") || k.includes("secret")
-      )
-    ),
-  };
-
-  if (req.method === "GET") {
-    // GET koristimo samo za dijagnostiku
-    return res.status(200).json({ ok: true, debug });
-  }
-
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed", debug });
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
-  if (!expected || !provided || provided !== expected) {
-    console.log("SnapTrade webhook auth FAILED", debug);
-    return res.status(401).json({ ok: false, error: "invalid_or_missing_secret", debug });
+  const secret = (process.env.SNAPTRADE_WEBHOOK_SECRET || "").trim();
+  if (!secret) {
+    // Bez tajne ne možemo verifikovati
+    return res.status(500).json({ ok: false, error: "Missing server secret" });
   }
 
-  // OK: pređi na payload
-  const event = await readBody(req);
-  console.log("SnapTrade webhook OK", {
-    type: event?.type,
-    id: event?.eventId || event?.id,
-  });
+  // 1) Pročitaj sirovo telo (VAŽNO! za ispravan HMAC)
+  const rawBody = await readRawBody(req);
+
+  // 2) Pokupi potpis iz headera
+  const incomingSig = getIncomingSignature(req);
+
+  // 3) DEV fallback (dozvoli i “X-Webhook-Secret: <secret>” za ručni test)
+  const devHeader = req.headers["x-webhook-secret"];
+  if (!incomingSig && devHeader && String(devHeader).trim() === secret) {
+    // ručni test bez HMAC-a
+  } else {
+    // 4) Izračunaj HMAC u oba formata (hex i base64), pa uporedi
+    const hmac = crypto.createHmac("sha256", secret).update(rawBody);
+
+    const expectedHex = hmac.digest("hex");
+    // moramo ponovo jer je stream potrošen posle digest-a
+    const expectedB64 = crypto
+      .createHmac("sha256", secret)
+      .update(rawBody)
+      .digest("base64");
+
+    if (!incomingSig || !(safeEqual(incomingSig, expectedHex) || safeEqual(incomingSig, expectedB64))) {
+      return res.status(401).json({
+        ok: false,
+        error: "invalid_signature",
+        // ako baš zapne, uključi kratko debug pa isključi u produkciji:
+        // debug: { incomingSig, expectedHex, expectedB64 }
+      });
+    }
+  }
+
+  // 5) Kada je verifikacija prošla, parsiraj telo i obradi event
+  let payload = {};
+  try {
+    payload = JSON.parse(rawBody.toString("utf8") || "{}");
+  } catch {
+    // ok, ostaje {}
+  }
+
+  // Primer: izvuci osnovno
+  const type = payload?.type || payload?.event_type || null;
+  const id = payload?.eventId || payload?.id || null;
+
+  // TODO: ovde mapiraj evente na tvoje radnje (Bubble Data API, itd.)
+  // npr:
+  // if (type === "connection.completed" || type === "account.linked") { ... }
+  // if (type === "connection.failed" || type === "connection.cancelled") { ... }
+  // if (type === "connection.disconnected") { ... }
+  // if (type === "sync.completed" || type === "positions.updated") { ... }
 
   return res.status(200).json({ ok: true });
 }
+
 
 
