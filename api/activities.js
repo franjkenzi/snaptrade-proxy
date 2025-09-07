@@ -15,48 +15,84 @@ export default async function handler(req, res) {
   try {
     const { userId, userSecret, accountId, start, end, cursor } = req.query;
     if (!userId || !userSecret || !accountId) {
-      return res.status(400).json({ ok: false, error: "Missing userId, userSecret or accountId" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing userId, userSecret or accountId" });
     }
 
-    // default: poslednjih 12 meseci
-    const startISO = start || new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString();
-    const endISO   = end   || new Date().toISOString();
+    // default: poslednja 3 meseca
+    const startISO =
+      start || new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString();
+    const endISO = end || new Date().toISOString();
 
-    // ▼ SDK poziv – zavisi od verzije SDK-a; ako ti je ime metode drugačije,
-    // pogledaj kako si radio u /api/accounts.js i prilagodi.
-    const resp = await snaptrade.accountActivities.listUserAccountActivities({
+    // ---- pronađi servis i funkciju bez obzira na naziv u SDK-u
+    const svc =
+      snaptrade.activities ||
+      snaptrade.accountActivities ||
+      snaptrade.activity ||
+      {};
+
+    const fn =
+      svc.listUserAccountActivities ||
+      svc.listActivitiesForAccount ||
+      svc.listActivities ||
+      svc.getActivities;
+
+    if (typeof fn !== "function") {
+      console.error("ACTIVITIES_FN_NOT_FOUND", {
+        sdkKeys: Object.keys(snaptrade || {}),
+        svcKeys: Object.keys(svc || {}),
+      });
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Activities function not found in SDK (check logs for available keys)",
+      });
+    }
+
+    const resp = await fn.call(svc, {
       userId,
       userSecret,
       accountId,
       startTime: startISO,
       endTime: endISO,
-      cursor, // opcionalno, za paginaciju
+      cursor,
     });
 
     const payload = resp?.data ?? resp;
 
-    // Normalizacija u jednostavne stavke, da Bubble lako vari
-    const items = (payload?.activities ?? payload ?? []).map(a => ({
+    // Normalizuj rezultate
+    const list =
+      payload?.activities ||
+      payload?.data ||
+      payload?.results ||
+      payload ||
+      [];
+
+    const items = list.map((a) => ({
       id: a.id || a.activityId || a.externalId,
       accountId,
       symbol: a.symbol || a.ticker || "",
-      side: (a.action || a.type || "").toUpperCase(),  // BUY / SELL / DIVIDEND / ...
+      side: String(a.action || a.type || "").toUpperCase(), // BUY/SELL/DIVIDEND...
       quantity: Number(a.units ?? a.quantity ?? 0),
       price: Number(a.price ?? 0),
       amount: Number(a.amount ?? 0),
       currency: a.currency || a.currencyCode || "USD",
-      executedAt: a.tradeDate || a.transactionDate || a.timestamp || a.date,
+      executedAt:
+        a.tradeDate || a.transactionDate || a.timestamp || a.date || null,
       fees: Number(a.fees ?? 0),
-      raw: a, // ceo objekat, za svaki slučaj
+      raw: a,
     }));
 
     res.status(200).json({
       ok: true,
       items,
-      nextCursor: payload?.next ?? null, // za paginaciju
+      nextCursor: payload?.next ?? payload?.nextCursor ?? null,
     });
   } catch (err) {
     const { status, data } = pickError(err);
+    console.error("ACTIVITIES_ERROR", data);
     res.status(status).json({ ok: false, error: data });
   }
 }
+
