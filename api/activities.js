@@ -19,7 +19,7 @@ export default async function handler(req, res) {
     }
 
     // default: poslednjih 12 meseci
-    const startISO = start || new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString();
+    const startISO = start || new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString();
     const endISO   = end   || new Date().toISOString();
 
     // ▼ SDK poziv – zavisi od verzije SDK-a; ako ti je ime metode drugačije,
