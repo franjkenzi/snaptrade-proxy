@@ -1,64 +1,57 @@
 // /api/transactions.js
 import snaptrade from "./_client.js";
 
-/**
- * Normalizacija datuma:
- * - prima bilo koji string/date, vraća "YYYY-MM-DD"
- * - SnapTrade uglavnom očekuje samo datum bez vremena
- */
+/** Pretvori bilo koji date/string u "YYYY-MM-DD" (SnapTrade tipično očekuje datum bez vremena) */
 function toIsoDate(v) {
   if (!v) return undefined;
   const d = new Date(v);
-  if (isNaN(d)) return undefined;
+  if (Number.isNaN(d.getTime())) return undefined;
   return d.toISOString().slice(0, 10);
 }
 
-/**
- * Odaberi prvi postojeći metod sa liste kandidata (razne verzije SDK-a).
- */
+/** Vrati prvo postojeće ime metode sa liste kandidata (različiti SDK buildovi) */
 function pickMethod(obj, names = []) {
   return names.find((n) => typeof obj?.[n] === "function") || null;
 }
 
-/**
- * Vercel handler
- */
 export default async function handler(req, res) {
   if (req.method !== "GET") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
-  const { userId, userSecret, accountId, start, end } = req.query;
-
-  if (!userId || !userSecret) {
-    return res.status(400).json({ ok: false, error: "Missing userId or userSecret" });
-  }
-
-  // payload koji će (u zavisnosti od SDK builda) pokriti više varijanti imena polja
-  const payload = {
-    userId,
-    userSecret,
-  };
-
-  // filter po nalogu (neke verzije traže accounts:[], neke accountId)
-  if (accountId) {
-    payload.accounts = [accountId];
-    payload.accountId = accountId;
-  }
-
-  const startDate = toIsoDate(start);
-  const endDate = toIsoDate(end);
-  if (startDate) {
-    payload.start = startDate;
-    payload.startDate = startDate;
-  }
-  if (endDate) {
-    payload.end = endDate;
-    payload.endDate = endDate;
-  }
-
   try {
-    // Odaberi koji "api" objekat imamo u clientu (zavisno od SDK builda)
+    const { userId, userSecret, accountId, start, end, cursor, peek } = req.query;
+
+    if (!userId || !userSecret) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing userId or userSecret" });
+    }
+
+    // Payload (pokriva i starije i novije nazive polja po SDK-u)
+    const payload = {
+      userId,
+      userSecret,
+    };
+
+    // Account filter: neke verzije traže accounts[], neke accountId
+    if (accountId) {
+      payload.accounts = [accountId];
+      payload.accountId = accountId;
+    }
+
+    const startDate = toIsoDate(start);
+    const endDate = toIsoDate(end);
+    if (startDate) {
+      payload.start = startDate;
+      payload.startDate = startDate;
+    }
+    if (endDate) {
+      payload.end = endDate;
+      payload.endDate = endDate;
+    }
+
+    // Odaberi API objekat prisutan u klijentu (zavisno od builda)
     const api =
       snaptrade.transactions ||
       snaptrade.transactionsAndReporting ||
@@ -71,7 +64,7 @@ export default async function handler(req, res) {
         .json({ ok: false, error: "Transactions API not initialized on client" });
     }
 
-    // Kandidati metoda (različiti buildovi SDK-a imaju druga imena)
+    // Kandidati za ime metode na različitim buildovima
     const methodName = pickMethod(api, [
       // Transactions
       "getUserTransactions",
@@ -81,27 +74,70 @@ export default async function handler(req, res) {
       "transactionsGet",
       "getUserAccountTransactions",
 
-      // Activities
+      // Activities (neki buildovi vraćaju isto kroz “activities”)
       "getActivities",
       "getUserActivities",
       "getAccountActivities",
       "activitiesGet",
+      "listActivities",
     ]);
 
+    // Debug peek (vrati dostupne ključeve da lakše pogodimo naziv)
     if (!methodName) {
-      const keys = Object.keys(api || {});
+      const sdkKeys = Object.keys(api || {});
+      if (peek === "1") {
+        return res.status(200).json({
+          ok: true,
+          debug: { sdkKeys },
+        });
+      }
       return res.status(500).json({
         ok: false,
-        error: "Transactions method not found on this SDK build",
-        availableKeys: keys,
+        error: "Transactions/Activities function not found in this SDK build",
+        debug: { sdkKeys },
       });
     }
 
-    // Pozovi metod
-    let resp = await api[methodName](payload);
+    // Poziv SDK-a
+    const resp = await api[methodName]({
+      ...payload,
+      cursor, // opcionalno, ako build podržava paginaciju
+    });
 
-    // Neke verzije SDK vraćaju { data }, druge direktno niz
-    let data = resp?.data ?? resp ?? [];
+    // Neke verzije vraćaju { data }, neke direktno niz
+    const data = resp?.data ?? resp ?? [];
+
+    // Izvuci listu transakcija/aktivnosti iz različitih oblika
+    const list = Array.isArray(data?.activities)
+      ? data.activities
+      : Array.isArray(data?.transactions)
+      ? data.transactions
+      : Array.isArray(data?.results)
+      ? data.results
+      : Array.isArray(data)
+      ? data
+      : [];
+
+    // NORMALIZACIJA → items (uvek isti ključevi)
+    const items = list.map((t) => ({
+      id: t.id || t.transactionId || t.activityId || t.externalId,
+      accountId: t.accountId || t.account_id,
+      symbol: t.symbol || t.ticker || "",
+      side: String(t.transaction_type || t.type || t.action || "").toUpperCase(),
+      quantity: Number(t.units ?? t.quantity ?? 0),
+      price: Number(t.price ?? 0),
+      amount: Number(t.amount ?? 0),
+      currency: t.currency || t.currencyCode || "USD",
+      executedAt:
+        t.trade_date ||
+        t.transaction_date ||
+        t.timestamp ||
+        t.date ||
+        null, // Bubble: :converted to date
+      fees: Number(t.fee ?? t.fees ?? 0),
+      raw: t,
+    }));
+
     return res.status(200).json({
       ok: true,
       usedMethod: methodName,
@@ -111,14 +147,16 @@ export default async function handler(req, res) {
         start: payload.start || payload.startDate,
         end: payload.end || payload.endDate,
       },
-      transactions: data,
+      transactions: data, // ostavljeno radi kompatibilnosti
+      items, // ← OVO koristi u Bubble-u
     });
   } catch (err) {
-    const status = err?.response?.status || 500;
+    const status = err?.response?.status ?? 500;
     const data = err?.response?.data ?? { message: String(err) };
     return res.status(status).json({ ok: false, error: data });
   }
 }
+
 
 
 
