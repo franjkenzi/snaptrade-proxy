@@ -32,10 +32,7 @@ export default async function handler(req, res) {
   }
 
   // payload koji će (u zavisnosti od SDK builda) pokriti više varijanti imena polja
-  const payload = {
-    userId,
-    userSecret,
-  };
+  const payload = { userId, userSecret };
 
   // filter po nalogu (neke verzije traže accounts:[], neke accountId)
   if (accountId) {
@@ -62,12 +59,7 @@ export default async function handler(req, res) {
     const activitiesKeys = Object.keys(snaptrade?.activities || {});
     return res.status(200).json({
       ok: true,
-      debug: {
-        sdkKeys,
-        transactionsKeys,
-        accountInfoKeys,
-        activitiesKeys,
-      },
+      debug: { sdkKeys, transactionsKeys, accountInfoKeys, activitiesKeys },
     });
   }
 
@@ -94,7 +86,6 @@ export default async function handler(req, res) {
       "userTransactionsGet",
       "transactionsGet",
       "getUserAccountTransactions",
-
       // Activities (ako build transakcije izbacuje kao “activities”)
       "getActivities",
       "getUserActivities",
@@ -124,7 +115,7 @@ export default async function handler(req, res) {
       ? data
       : [];
 
-    // Normalizuj u jedinstvenu šemu + dodaj executedAtMs za Bubble (date)
+    // Normalizuj u jedinstvenu šemu + dodaj executedAtMs i rawText
     const items = list.map((t) => {
       const dateStr =
         t.tradeDate ||
@@ -132,25 +123,48 @@ export default async function handler(req, res) {
         t.timestamp ||
         t.date ||
         t.trade_date ||
-        t.transaction_date;
+        t.transaction_date ||
+        null;
+
+      // šire hvatanje simbola i valute iz potencijalno ugnježdenih struktura
+      const symbol =
+        t.symbol ||
+        t.ticker ||
+        t.universal_symbol?.symbol ||
+        t.security?.symbol ||
+        t.price?.symbol ||
+        "";
+
+      const currency =
+        t.currency ||
+        t.currencyCode ||
+        t.price?.currency ||
+        t.currency_code ||
+        "USD";
+
+      // stringify celog zapisa za Bubble text field
+      let rawText = "";
+      try {
+        rawText = JSON.stringify(t);
+      } catch {}
 
       return {
         id: t.id || t.activityId || t.externalId,
         accountId,
-        symbol: t.symbol || t.ticker || "",
+        symbol,
         side: String(t.action || t.type || "").toUpperCase(),
         quantity: Number(t.units ?? t.quantity ?? 0),
         price: Number(t.price ?? 0),
         amount: Number(t.amount ?? 0),
-        currency: t.currency || t.currencyCode || "USD",
+        currency,
         executedAt: dateStr, // ISO/tekst
-        executedAtMs: dateStr ? new Date(dateStr).getTime() : null, // ← ključno za Bubble date
-        fees: Number(t.fees ?? 0),
+        executedAtMs: dateStr ? new Date(dateStr).getTime() : null, // za Bubble date
+        fees: Number(t.fees ?? t.fee ?? 0),
         raw: t,
+        rawText, // <- NOVO: stringifikovani payload za Bubble "raw_json" (text)
       };
     });
 
-    // Vraćamo normalizovane zapise pod "transactions"
     return res.status(200).json({
       ok: true,
       usedMethod: methodName,
@@ -160,8 +174,8 @@ export default async function handler(req, res) {
         start: payload.start || payload.startDate,
         end: payload.end || payload.endDate,
       },
-      transactions: items, // listu za Bubble "Schedule API workflow on a list"
-      raw: list, // neobavezno: originalni zapisi ako ti zatrebaju
+      transactions: items, // list za "Schedule API Workflow on a list"
+      raw: list, // opcionalno
     });
   } catch (err) {
     const status = err?.response?.status || 500;
@@ -169,6 +183,8 @@ export default async function handler(req, res) {
     return res.status(status).json({ ok: false, error: data });
   }
 }
+
+
 
 
 
