@@ -1,220 +1,173 @@
 // /api/transactions.js
-// Next.js / Vercel API route
-// U ovoj ruti radimo dva pokušaja prema SnapTrade-u:
-//   1) /activities
-//   2) /transactions
-// šta god vrati listu, normalizujemo u "items" + dodamo rawText i executedAtMs.
-//
-// Konfiguracija:
-//   process.env.UPSTREAM_BASE   -> baza za upstream (npr. "https://api.snaptrade.com/api/v1")
-//   (Ako koristiš svoj interni upstream/proxy, stavi njegov base ovde.)
-//
-/* eslint-disable no-console */
+import snaptrade from "./_client.js";
+
+/**
+ * Normalizacija datuma:
+ * - prima bilo koji string/date, vraća "YYYY-MM-DD"
+ * - SnapTrade uglavnom očekuje samo datum bez vremena
+ */
+function toIsoDate(v) {
+  if (!v) return undefined;
+  const d = new Date(v);
+  if (isNaN(d)) return undefined;
+  return d.toISOString().slice(0, 10);
+}
+
+/** Odaberi prvi postojeći metod sa liste kandidata (razne verzije SDK-a). */
+function pickMethod(obj, names = []) {
+  return names.find((n) => typeof obj?.[n] === "function") || null;
+}
 
 export default async function handler(req, res) {
-  try {
-    // CORS (safe po defaultu)
-    if (req.method === "OPTIONS") {
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-      return res.status(200).end();
-    }
-    if (req.method !== "GET") {
-      return json(res, 405, { ok: false, error: "Method not allowed" });
-    }
+  if (req.method !== "GET") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
+  }
 
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
+  const { userId, userSecret, accountId, start, end, peek } = req.query;
 
-    const {
-      userId,
-      userSecret,
-      accountId,
-      start,
-      end,
-      peek,
-    } = req.query;
+  if (!userId || !userSecret) {
+    return res
+      .status(400)
+      .json({ ok: false, error: "Missing userId or userSecret" });
+  }
 
-    // Validacija inputa
-    if (!userId || !userSecret || !accountId) {
-      return json(res, 400, {
-        ok: false,
-        error: "Missing required query params: userId, userSecret, accountId",
-      });
-    }
+  // payload koji će (u zavisnosti od SDK builda) pokriti više varijanti imena polja
+  const payload = {
+    userId,
+    userSecret,
+  };
 
-    // Datumi (fallback: zadnja 3 meseca)
-    const { startISO, endISO } = makeDateRange(start, end);
+  // filter po nalogu (neke verzije traže accounts:[], neke accountId)
+  if (accountId) {
+    payload.accounts = [accountId];
+    payload.accountId = accountId;
+  }
 
-    // Upstream base
-    const UPSTREAM = process.env.UPSTREAM_BASE || "https://api.snaptrade.com/api/v1";
+  const startDate = toIsoDate(start);
+  const endDate = toIsoDate(end);
+  if (startDate) {
+    payload.start = startDate;
+    payload.startDate = startDate;
+  }
+  if (endDate) {
+    payload.end = endDate;
+    payload.endDate = endDate;
+  }
 
-    // Helper: zovi upstream (GET qs)
-    const callUpstream = async (path, qs) => {
-      const url = new URL(path, UPSTREAM);
-      Object.entries(qs).forEach(([k, v]) => {
-        if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
-      });
-      const r = await fetch(url.toString(), { method: "GET" });
-      if (!r.ok) {
-        const txt = await r.text().catch(() => "");
-        throw new Error(`Upstream ${path} error ${r.status}: ${txt || r.statusText}`);
-      }
-      return r.json();
-    };
-
-    // 1) pokušaj: activities
-    let usedMethod = "getActivities";
-    let data = null;
-    try {
-      data = await callUpstream("/activities", {
-        userId,
-        userSecret,
-        accountId,
-        start: startISO,
-        end: endISO,
-      });
-    } catch (e) {
-      // nastavi na /transactions
-      data = null;
-    }
-
-    // strukture koje eventualno mogu doći
-    let list =
-      (Array.isArray(data?.activities) && data.activities) ||
-      (Array.isArray(data?.data?.activities) && data.data.activities) ||
-      null;
-
-    // 2) fallback: transactions
-    if (!list || list.length === 0) {
-      usedMethod = "getTransactions";
-      const tData = await callUpstream("/transactions", {
-        userId,
-        userSecret,
-        accountId,
-        start: startISO,
-        end: endISO,
-      });
-      list =
-        (Array.isArray(tData?.transactions) && tData.transactions) ||
-        (Array.isArray(tData?.data?.transactions) && tData.data.transactions) ||
-        [];
-      data = tData;
-    }
-
-    // Normalizacija -> items
-    const items = (Array.isArray(list) ? list : []).map((t) => normalizeItem(t, accountId));
-
-    // Ako želiš peek, samo skrati
-    let outItems = items;
-    if (peek) {
-      const n = Number(peek);
-      if (!Number.isNaN(n) && n > 0) outItems = items.slice(0, n);
-    }
-
-    return json(res, 200, {
+  // --- PEEK / debug: vrati koje su klase/metode dostupne u SDK-u
+  if (peek === "1") {
+    const sdkKeys = Object.keys(snaptrade || {});
+    const transactionsKeys = Object.keys(snaptrade?.transactions || {});
+    const accountInfoKeys = Object.keys(snaptrade?.accountInformation || {});
+    const activitiesKeys = Object.keys(snaptrade?.activities || {});
+    return res.status(200).json({
       ok: true,
-      usedMethod,
-      payloadUsed: {
-        userId,
-        accountId,
-        start: startISO,
-        end: endISO,
+      debug: {
+        sdkKeys,
+        transactionsKeys,
+        accountInfoKeys,
+        activitiesKeys,
       },
-      // ostavljamo "transactions" zbog kompatibilnosti sa Bubble setupom
-      transactions: list || [],
-      items: outItems,
+    });
+  }
+
+  try {
+    // Odaberi koji "api" objekat imamo u clientu (zavisno od SDK builda)
+    const api =
+      snaptrade.transactions ||
+      snaptrade.transactionsAndReporting ||
+      snaptrade.accountInformation ||
+      snaptrade.activities;
+
+    if (!api) {
+      return res
+        .status(500)
+        .json({ ok: false, error: "Transactions API not initialized on client" });
+    }
+
+    // Kandidati metoda (različiti buildovi SDK-a imaju druga imena)
+    const methodName = pickMethod(api, [
+      // Transactions
+      "getUserTransactions",
+      "getTransactions",
+      "listTransactions",
+      "userTransactionsGet",
+      "transactionsGet",
+      "getUserAccountTransactions",
+
+      // Activities (ako build transakcije izbacuje kao “activities”)
+      "getActivities",
+      "getUserActivities",
+      "getAccountActivities",
+      "activitiesGet",
+    ]);
+
+    if (!methodName) {
+      const keys = Object.keys(api || {});
+      return res.status(500).json({
+        ok: false,
+        error: "Transactions method not found on this SDK build",
+        availableKeys: keys,
+      });
+    }
+
+    // Pozovi metod
+    const resp = await api[methodName](payload);
+    const data = resp?.data ?? resp ?? [];
+
+    // Izvuci listu: može biti data.activities, data.transactions ili sam niz
+    const list = Array.isArray(data?.activities)
+      ? data.activities
+      : Array.isArray(data?.transactions)
+      ? data.transactions
+      : Array.isArray(data)
+      ? data
+      : [];
+
+    // Normalizuj u jedinstvenu šemu + dodaj executedAtMs za Bubble (date)
+    const items = list.map((t) => {
+      const dateStr =
+        t.tradeDate ||
+        t.transactionDate ||
+        t.timestamp ||
+        t.date ||
+        t.trade_date ||
+        t.transaction_date;
+
+      return {
+        id: t.id || t.activityId || t.externalId,
+        accountId,
+        symbol: t.symbol || t.ticker || "",
+        side: String(t.action || t.type || "").toUpperCase(),
+        quantity: Number(t.units ?? t.quantity ?? 0),
+        price: Number(t.price ?? 0),
+        amount: Number(t.amount ?? 0),
+        currency: t.currency || t.currencyCode || "USD",
+        executedAt: dateStr, // ISO/tekst
+        executedAtMs: dateStr ? new Date(dateStr).getTime() : null, // ← ključno za Bubble date
+        fees: Number(t.fees ?? 0),
+        raw: t,
+      };
+    });
+
+    // Vraćamo normalizovane zapise pod "transactions"
+    return res.status(200).json({
+      ok: true,
+      usedMethod: methodName,
+      payloadUsed: {
+        userId: payload.userId,
+        accountId: payload.accountId,
+        start: payload.start || payload.startDate,
+        end: payload.end || payload.endDate,
+      },
+      transactions: items, // listu za Bubble "Schedule API workflow on a list"
+      raw: list, // neobavezno: originalni zapisi ako ti zatrebaju
     });
   } catch (err) {
-    console.error("transactions route error:", err);
-    return json(res, 500, { ok: false, error: String(err?.message || err) });
+    const status = err?.response?.status || 500;
+    const data = err?.response?.data ?? { message: String(err) };
+    return res.status(status).json({ ok: false, error: data });
   }
-}
-
-/* ----------------------- helpers ----------------------- */
-
-function json(res, status, body) {
-  res.statusCode = status;
-  res.end(JSON.stringify(body));
-}
-
-function makeDateRange(start, end) {
-  const now = new Date();
-  const endDate = parseDate(end) || now;
-  const startDate =
-    parseDate(start) || new Date(endDate.getTime() - 90 * 24 * 60 * 60 * 1000); // -90d
-
-  return {
-    startISO: toISODate(startDate),
-    endISO: toISODate(endDate),
-  };
-}
-
-function parseDate(v) {
-  if (!v) return null;
-  if (typeof v === "number") return new Date(v);
-  if (typeof v === "string") {
-    // podrži ms timestamp ili ISO
-    const n = Number(v);
-    if (!Number.isNaN(n) && v.trim() !== "") return new Date(n);
-    const d = new Date(v);
-    if (!Number.isNaN(d.getTime())) return d;
-  }
-  return null;
-}
-
-function toISODate(d) {
-  // SnapTrade očekuje ISO; ostavi ceo ISO string
-  return d.toISOString();
-}
-
-function normalizeItem(t, accountId) {
-  // pokuša da nađe "najbolje" polje za datum
-  const dateStr =
-    t.tradeDate ||
-    t.transactionDate ||
-    t.timestamp ||
-    t.date ||
-    t.trade_date ||
-    t.transaction_date ||
-    null;
-
-  let rawText = "";
-  try {
-    rawText = JSON.stringify(t);
-  } catch (_) {
-    rawText = "";
-  }
-
-  const symbol =
-    t.symbol ||
-    t.ticker ||
-    t?.universal_symbol?.symbol ||
-    t?.security_symbol ||
-    "";
-
-  const currency =
-    t.currency ||
-    t.currencyCode ||
-    t?.price?.currency ||
-    "USD";
-
-  return {
-    id: t.id || t.activityId || t.externalId || t.external_id || null,
-    accountId,
-    symbol,
-    side: String(t.action || t.type || "").toUpperCase(),
-    quantity: Number(t.units ?? t.quantity ?? 0),
-    price: Number(t.price ?? 0),
-    amount: Number(t.amount ?? 0),
-    currency,
-    executedAt: dateStr,                                 // ISO tekst (kako je došlo)
-    executedAtMs: dateStr ? new Date(dateStr).getTime() : null, // broj (ms)
-    fees: Number(t.fees ?? t.fee ?? 0),
-    raw: t,          // originalni objekat (za debug)
-    rawText,        // <<< tekst za Bubble (snima se u Trade.raw_json)
-  };
 }
 
 
